@@ -64,6 +64,44 @@ var MAX_UNITS_PER_SIDE = 40;
 var FRONT_SPEED = 22;        // how fast the trench line crawls, px/s at ui 1
 var FRONT_RANK = 8;          // one unit in eight is in the open — see inCover()
 
+/* --------------------------- custom / god mode --------------------------
+   A sandbox layer for players who want to bend the game over a knee. Every value
+   here is identity by default, so the tuned, verified game is untouched until you
+   actually move something — assert that in the harness after any change here. */
+var TWEAK_DEFAULTS = {
+  invincible: false,     // our units and HQ simply do not take damage
+  infiniteInk: false,    // ink is pinned at full
+  inkRegen: 1,           // multiplier on PLAYER_REGEN
+  startInk: 10,
+  dmg: 1, hp: 1, range: 1, speed: 1,   // ours, baked in when a unit deploys
+  foeDmg: 1, foeHp: 1,                 // theirs
+  noAI: false,           // no enemy reinforcements at all
+  duration: DURATION,    // 0 = no time limit
+  hqHp: HQ_HP
+};
+var TWEAKS = {};
+for (var twk in TWEAK_DEFAULTS) TWEAKS[twk] = TWEAK_DEFAULTS[twk];
+
+// [group, label, key, kind, min, max, step] — kind: toggle | num | act
+var TWEAK_ROWS = [
+  ["you", "无敌 Invincible", "invincible", "toggle"],
+  ["you", "无限墨水 Infinite ink", "infiniteInk", "toggle"],
+  ["you", "回墨速度 Ink regen", "inkRegen", "num", 0.25, 4, 0.25],
+  ["you", "起始墨水 Starting ink", "startInk", "num", 0, 10, 1],
+  ["you", "伤害 Damage", "dmg", "num", 0.5, 5, 0.25],
+  ["you", "生命 Health", "hp", "num", 0.5, 5, 0.25],
+  ["you", "射程 Range", "range", "num", 0.5, 3, 0.25],
+  ["you", "速度 Speed", "speed", "num", 0.5, 3, 0.25],
+  ["foe", "伤害 Damage", "foeDmg", "num", 0.2, 3, 0.2],
+  ["foe", "生命 Health", "foeHp", "num", 0.2, 3, 0.2],
+  ["foe", "停止出兵 No reinforcements", "noAI", "toggle"],
+  ["match", "时长 Duration", "duration", "num", 0, 600, 15],
+  ["match", "HQ 血量 HQ health", "hqHp", "num", 200, 20000, 200],
+  ["match", "立即胜利 Win now", "win", "act"],
+  ["match", "全部重置 Reset all", "reset", "act"]
+];
+var TWEAK_GROUPS = [["you", "你 YOU"], ["foe", "敌 ENEMY"], ["match", "战场 MATCH"]];
+
 /* ------------------------------- state --------------------------------- */
 var W = 0, H = 0, DPR = 1;
 var paperCv = null, bluePat = null, redPat = null;
@@ -99,6 +137,10 @@ var G = {
   mouse: { x: -9999, y: -9999 },
   helpOpen: false,
   helpPaused: false,
+  tweaksOpen: false,
+  tweakPaused: false,
+  tweakRow: 0,           // keyboard cursor into the custom panel
+  drag: null,            // { key, x0, x1, w } while a slider is being dragged
   hint: "",
   hintT: 0,
   result: null,
@@ -506,8 +548,8 @@ function startGame(diff) {
   G.screen = "playing";
   G.paused = false;
   G.speed = 1;
-  G.time = DURATION;
-  G.ink = 10;
+  G.time = TWEAKS.duration > 0 ? TWEAKS.duration : 0;
+  G.ink = TWEAKS.startInk;
   G.aiInk = 8;
   G.units = [];
   G.projs = [];
@@ -526,9 +568,9 @@ function startGame(diff) {
 
   var f = L.field;
   var m = Math.round(38 * L.ui);
-  G.playerHQ = { side: "blue", isHQ: true, x: m, y: f.y + f.h / 2, hp: HQ_HP, maxHp: HQ_HP, flash: 0,
+  G.playerHQ = { side: "blue", isHQ: true, x: m, y: f.y + f.h / 2, hp: TWEAKS.hqHp, maxHp: TWEAKS.hqHp, flash: 0,
                  range: HQ_RANGE * L.ui, turretT: 0.6, calm: 0 };
-  G.enemyHQ  = { side: "red",  isHQ: true, x: W - m, y: f.y + f.h / 2, hp: HQ_HP, maxHp: HQ_HP, flash: 0,
+  G.enemyHQ  = { side: "red",  isHQ: true, x: W - m, y: f.y + f.h / 2, hp: TWEAKS.hqHp, maxHp: TWEAKS.hqHp, flash: 0,
                  range: HQ_RANGE * L.ui, turretT: 0.6, calm: 0 };
   G.frontX = W / 2;
   G.blueLead = -1; G.redLead = 1e9;
@@ -578,7 +620,12 @@ function spawnUnit(side, type, x, preferY) {
   var d = UNITS[type];
   if (!d || d.instant) return null;
   if (countSide(side) >= MAX_UNITS_PER_SIDE) return null;
-  var mul = side === "red" ? DIFFS[G.diff].stat : 1;
+  var isRed = (side === "red");
+  var stat = isRed ? DIFFS[G.diff].stat : 1;
+  var hpMul = stat * (isRed ? TWEAKS.foeHp : TWEAKS.hp);
+  var dmgMul = stat * (isRed ? TWEAKS.foeDmg : TWEAKS.dmg);
+  var rngMul = isRed ? 1 : TWEAKS.range;
+  var spdMul = isRed ? 1 : TWEAKS.speed;
   var f = L.field;
   var pad = 18 * L.ui;
   // An explicit lane is honoured exactly — the player's auto-lane is a decision,
@@ -593,10 +640,10 @@ function spawnUnit(side, type, x, preferY) {
     id: uid++, side: side, key: type, isHQ: false,
     x: clamp(x, 10, W - 10),
     y: lane,
-    hp: d.hp * mul, maxHp: d.hp * mul,
-    speed: d.speed * L.ui * 0.92,
-    range: d.range * L.ui,
-    dmg: d.dmg * mul,
+    hp: d.hp * hpMul, maxHp: d.hp * hpMul,
+    speed: d.speed * L.ui * 0.92 * spdMul,
+    range: d.range * L.ui * rngMul,
+    dmg: d.dmg * dmgMul,
     rate: d.rate,
     splash: d.splash ? d.splash * L.ui : 0,
     atkT: 0.3 + Math.random() * 0.35,
@@ -761,6 +808,7 @@ function inCover(u) {
 
 function damageUnit(u, dmg) {
   if (u.hp <= 0) return;
+  if (TWEAKS.invincible && u.side === "blue") return;   // custom: nothing can touch us
   if (inCover(u)) dmg *= 0.5;            // 50% damage reduction for the support ranks
   u.hp -= dmg;
   u.flash = 0.16;
@@ -775,6 +823,7 @@ function killUnit(u) {
 }
 
 function damageHQ(hq, dmg) {
+  if (TWEAKS.invincible && hq.side === "blue") return;
   hq.hp -= dmg;
   hq.flash = 0.2;
   if (hq.hp <= 0) {
@@ -845,12 +894,18 @@ function comebackMul(side) {
 
 function update(dt) {
   G.t += dt;
-  // timer
-  G.time -= dt;
-  if (G.time <= 0) { G.time = 0; endGame("time"); return; }
+  // timer (a custom duration of 0 means the match runs until somebody wins)
+  if (TWEAKS.duration > 0) {
+    G.time -= dt;
+    if (G.time <= 0) { G.time = 0; endGame("time"); return; }
+  }
 
   // ink economy (with a comeback trickle for whoever is being pushed back)
-  G.ink = Math.min(10, G.ink + PLAYER_REGEN * comebackMul("blue") * dt);
+  if (TWEAKS.infiniteInk) {
+    G.ink = 10;
+  } else {
+    G.ink = Math.min(10, G.ink + PLAYER_REGEN * TWEAKS.inkRegen * comebackMul("blue") * dt);
+  }
   G.aiInk = Math.min(10, G.aiInk + DIFFS[G.diff].regen * comebackMul("red") * dt);
 
   updateAI(dt);
@@ -1156,6 +1211,7 @@ function pickAIType() {
 }
 
 function updateAI(dt) {
+  if (TWEAKS.noAI) return;
   var dd = DIFFS[G.diff];
   G.aiTimer -= dt;
   if (G.aiTimer > 0) return;
@@ -1221,6 +1277,72 @@ function setHint(msg) {
   G.hintT = 2.0;
 }
 
+/* ------------------------- custom / god mode logic ---------------------- */
+function applyHqHp() {
+  var list = [G.playerHQ, G.enemyHQ];
+  for (var i = 0; i < list.length; i++) {
+    var hq = list[i];
+    if (!hq) continue;
+    var frac = hq.maxHp ? hq.hp / hq.maxHp : 1;
+    hq.maxHp = TWEAKS.hqHp;
+    hq.hp = clamp(hq.maxHp * frac, 1, hq.maxHp);
+  }
+}
+
+function setTweak(key, v) {
+  if (key === "win") {                     // an action, not a value
+    if (G.screen === "playing" && G.enemyHQ) { G.enemyHQ.hp = 0; endGame("hq"); }
+    return;
+  }
+  if (key === "reset") {
+    for (var k in TWEAK_DEFAULTS) TWEAKS[k] = TWEAK_DEFAULTS[k];
+    applyHqHp();
+    setHint("已恢复默认 \u00b7 Back to defaults");
+    return;
+  }
+  TWEAKS[key] = v;
+  if (key === "hqHp") applyHqHp();
+  if (key === "duration" && G.screen === "playing") {
+    // a shorter clock takes effect at once; 0 means there is no clock to show
+    G.time = v > 0 ? (G.time > 0 ? Math.min(G.time, v) : v) : 0;
+  }
+}
+
+function stepTweak(key, dir) {
+  var row = null, i;
+  for (i = 0; i < TWEAK_ROWS.length; i++) if (TWEAK_ROWS[i][2] === key) row = TWEAK_ROWS[i];
+  if (!row) return;
+  if (row[3] === "toggle") { setTweak(key, !TWEAKS[key]); return; }
+  if (row[3] === "act") { setTweak(key, 0); return; }
+  var step = row[6], v = TWEAKS[key] + dir * step;
+  setTweak(key, clamp(Math.round(v * 1000) / 1000, row[4], row[5]));
+}
+
+// Any difference from the shipped values? Drives the "custom" badge on the tray.
+function anyTweak() {
+  for (var k in TWEAK_DEFAULTS) if (TWEAKS[k] !== TWEAK_DEFAULTS[k]) return true;
+  return false;
+}
+
+function tweakText(key) {
+  if (key === "duration") return TWEAKS.duration > 0 ? TWEAKS.duration + "s" : "无限 \u221e";
+  if (key === "hqHp") return String(TWEAKS.hqHp);
+  if (key === "startInk") return String(TWEAKS.startInk);
+  return TWEAKS[key].toFixed(2).replace(/0$/, "") + "\u00d7";
+}
+
+function setTweaks(open) {
+  G.tweaksOpen = open;
+  if (open) {
+    G.guideOpen = false;
+    // never let the battle run on behind the panel
+    if (G.screen === "playing" && !G.paused) { G.paused = true; G.tweakPaused = true; }
+  } else if (G.tweakPaused) {
+    G.paused = false;
+    G.tweakPaused = false;
+  }
+}
+
 // Deploying costs exactly one action: pick a card and the unit is already on its
 // way. There is never a second click on the battlefield. *Where* it comes out is a
 // setting: manual (you point, the game remembers the point) or auto (the game reads
@@ -1258,11 +1380,11 @@ function deployCard(key) {
   if (G.screen !== "playing" || G.paused) return;
   var def = UNITS[key];
   if (!def) return;
-  if (G.ink < def.cost) { setHint("墨水不足 · Not enough ink"); return; }
+  if (!TWEAKS.infiniteInk && G.ink < def.cost) { setHint("墨水不足 · Not enough ink"); return; }
 
   if (def.instant) {
     var t = targetBlot();
-    G.ink -= def.cost;
+    if (!TWEAKS.infiniteInk) G.ink -= def.cost;
     G.lastKey = key;
     spawnInkBlot("blue", t.x, t.y, def.dmg, def.radius * L.ui);
     return;
@@ -1278,15 +1400,37 @@ function deployCard(key) {
     setHint("部队已满 " + MAX_UNITS_PER_SIDE + " · Unit limit reached");
     return;
   }
-  G.ink -= def.cost;
+  if (!TWEAKS.infiniteInk) G.ink -= def.cost;
   G.lastKey = key;
   ring(made.x, made.y, 30 * L.ui, C.blue);   // "it came out right here"
+}
+
+function hitDrag(x, y) {
+  for (var i = tweakDrags.length - 1; i >= 0; i--) {
+    var d = tweakDrags[i];
+    if (x >= d.x && x <= d.x + d.w && y >= d.y && y <= d.y + d.h) return d;
+  }
+  return null;
+}
+
+function dragTweak(d, mx) {
+  var f = clamp((mx - d.x) / Math.max(1, d.w), 0, 1);
+  var v = d.min + f * (d.max - d.min);
+  v = Math.round(v / d.step) * d.step;
+  setTweak(d.key, clamp(Math.round(v * 1000) / 1000, d.min, d.max));
 }
 
 cvs.addEventListener("pointerdown", function (e) {
   e.preventDefault();
   var p = canvasPos(e);
   G.mouse.x = p.x; G.mouse.y = p.y;
+
+  // Slider tracks come first: they are not pushButtons, and the panel's full-screen
+  // dismiss would otherwise swallow every one of them.
+  if (G.tweaksOpen) {
+    var d = hitDrag(p.x, p.y);
+    if (d) { G.drag = d; dragTweak(d, p.x); return; }
+  }
 
   var b = hitButton(p.x, p.y);
   if (b) { b.action(); return; }
@@ -1300,6 +1444,7 @@ cvs.addEventListener("pointerdown", function (e) {
 cvs.addEventListener("pointermove", function (e) {
   var p = canvasPos(e);
   G.mouse.x = p.x; G.mouse.y = p.y;
+  if (G.drag) { dragTweak(G.drag, p.x); return; }
   if (overField(p.x, p.y)) {
     G.aim.x = p.x;
     G.aim.y = clamp(p.y, L.field.y, L.field.y + L.field.h);
@@ -1307,6 +1452,8 @@ cvs.addEventListener("pointermove", function (e) {
     G.aim.kb = false;                    // the pointer takes over the aim
   }
 });
+
+window.addEventListener("pointerup", function () { G.drag = null; });
 
 cvs.addEventListener("pointerleave", function () {
   G.mouse.x = -9999; G.mouse.y = -9999;
@@ -1353,6 +1500,27 @@ function setHelp(open) {
 window.addEventListener("keydown", function (e) {
   var k = e.key;
   var key = (k.length === 1) ? k.toLowerCase() : k;
+
+  // the custom panel works anywhere, and closes the guide if that was open
+  if (key === "c") {
+    G.guideOpen = false;
+    setTweaks(!G.tweaksOpen);
+    e.preventDefault();
+    return;
+  }
+  if (G.tweaksOpen) {
+    if (k === "Escape") { setTweaks(false); e.preventDefault(); return; }
+    if (tweakRows.length) {
+      var idx = clamp(G.tweakRow, 0, tweakRows.length - 1);
+      if (k === "ArrowDown") G.tweakRow = (idx + 1) % tweakRows.length;
+      else if (k === "ArrowUp") G.tweakRow = (idx + tweakRows.length - 1) % tweakRows.length;
+      else if (k === "ArrowLeft") stepTweak(tweakRows[idx].key, -1);
+      else if (k === "ArrowRight") stepTweak(tweakRows[idx].key, 1);
+      else if (k === " " || k === "Enter") stepTweak(tweakRows[idx].key, 1);
+    }
+    e.preventDefault();
+    return;
+  }
 
   // help overlay works everywhere
   if (key === "h" || k === "?" || k === "/") { setHelp(!G.helpOpen); e.preventDefault(); return; }
@@ -1419,6 +1587,7 @@ function render() {
 
   if (G.screen === "over") { BTN_ON = true; drawOver(); }
   if (G.helpOpen) { BTN_ON = true; drawHelpModal(); }
+  if (G.tweaksOpen) { BTN_ON = true; drawTweakModal(); }
 }
 
 // The battlefield's only job is to show *where* the next unit will land: the
@@ -1529,7 +1698,7 @@ function drawGame() {
   drawHUD();
   drawBar();
   drawHint();
-  if (G.paused && !G.helpOpen) drawPaused();
+  if (G.paused && !G.helpOpen && !G.tweaksOpen) drawPaused();
 }
 
 /* --- battlefield --- */
@@ -1869,20 +2038,26 @@ function drawHUD() {
   ctx.fillText("Red HQ", W - pad, top + 12 * ui);
   drawHealthBar(W - pad - barW, top + 18 * ui, barW, barH, G.enemyHQ.hp / G.enemyHQ.maxHp, "red");
 
-  // clock
-  var t = Math.max(0, Math.ceil(G.time));
-  var mm = Math.floor(t / 60);
-  var ss = t % 60;
-  var label = mm + ":" + (ss < 10 ? "0" : "") + ss;
+  // clock (a custom duration of 0 has no clock at all)
+  var label;
+  if (TWEAKS.duration > 0) {
+    var t = Math.max(0, Math.ceil(G.time));
+    var mm = Math.floor(t / 60);
+    var ss = t % 60;
+    label = mm + ":" + (ss < 10 ? "0" : "") + ss;
+  } else {
+    label = "\u221e";
+  }
   ctx.textAlign = "center";
   ctx.font = "bold " + Math.round(40 * ui) + "px " + FONT;
-  ctx.fillStyle = G.time <= 20 ? C.red : "#16234c";
+  ctx.fillStyle = (TWEAKS.duration > 0 && G.time <= 20) ? C.red : "#16234c";
   ctx.fillText(label, W / 2, top + 34 * ui);
 
   var pct = Math.round(clamp(G.frontX / W, 0, 1) * 100);
+  var custom = anyTweak();
   ctx.font = "bold " + Math.round(15 * ui) + "px " + FONT;
-  ctx.fillStyle = "#28345c";
-  ctx.fillText("Your territory " + pct + "%", W / 2, top + 54 * ui);
+  ctx.fillStyle = custom ? C.red : "#28345c";
+  ctx.fillText("Your territory " + pct + "%" + (custom ? "  \u00b7  CUSTOM" : ""), W / 2, top + 54 * ui);
 
   // pause / speed buttons
   var bs = 26 * ui;
@@ -2465,34 +2640,54 @@ function drawMenu() {
   });
   y += ph + 18 * ui;
 
-  // unit guide toggle
+  // unit guide + custom sandbox, side by side
   var gh = Math.min(34 * ui, H * 0.055);
-  var gx = bx, gw = bw;
+  var halfW = (bw - gap) / 2;
   ctx.save();
   ctx.fillStyle = "rgba(255,255,255,0.7)";
-  roundRectPath(ctx, gx, y, gw, gh, 5 * ui);
+  roundRectPath(ctx, bx, y, halfW, gh, 5 * ui);
   ctx.fill();
   ctx.setLineDash([7 * ui, 5 * ui]);
   ctx.strokeStyle = "#1d2b55";
   ctx.lineWidth = 1.8;
-  roundRectPath(ctx, gx, y, gw, gh, 5 * ui);
+  roundRectPath(ctx, bx, y, halfW, gh, 5 * ui);
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.fillStyle = "#16234c";
-  ctx.font = "bold " + Math.round(14 * ui) + "px " + FONT;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText((G.guideOpen ? "▼ " : "▶ ") + "Unit guide (optional)", gx + 14 * ui, y + gh / 2 + 1);
+  fitFont((G.guideOpen ? "\u25bc " : "\u25b6 ") + "Unit guide \u00b7 \u56fe\u9274", halfW - 20 * ui, 14 * ui);
+  ctx.fillText((G.guideOpen ? "\u25bc " : "\u25b6 ") + "Unit guide \u00b7 \u56fe\u9274", bx + 12 * ui, y + gh / 2 + 1);
+  ctx.restore();
+  pushButton({ id: "guide", x: bx, y: y, w: halfW, h: gh, action: function () { G.guideOpen = !G.guideOpen; } });
+
+  var cx2 = bx + halfW + gap;
+  ctx.save();
+  ctx.fillStyle = G.tweaksOpen ? "#ffd54a" : "rgba(255,255,255,0.7)";
+  roundRectPath(ctx, cx2, y, halfW, gh, 5 * ui);
+  ctx.fill();
+  ctx.setLineDash([7 * ui, 5 * ui]);
+  ctx.strokeStyle = anyTweak() ? C.red : "#1d2b55";
+  ctx.lineWidth = anyTweak() ? 2.2 : 1.8;
+  roundRectPath(ctx, cx2, y, halfW, gh, 5 * ui);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = anyTweak() ? C.redDeep : "#16234c";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  var cl = (G.tweaksOpen ? "\u25bc " : "\u25b6 ") + "Custom \u00b7 \u81ea\u5b9a\u4e49" + (anyTweak() ? " \u2022" : "");
+  fitFont(cl, halfW - 20 * ui, 14 * ui);
+  ctx.fillText(cl, cx2 + 12 * ui, y + gh / 2 + 1);
   ctx.restore();
   ctx.textBaseline = "alphabetic";
-  pushButton({ id: "guide", x: gx, y: y, w: gw, h: gh, action: function () { G.guideOpen = !G.guideOpen; } });
+  pushButton({ id: "custom", x: cx2, y: y, w: halfW, h: gh, action: function () { setTweaks(!G.tweaksOpen); } });
   y += gh + 10 * ui;
 
   // hotkey discovery
   ctx.save();
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  var kbLine = "Keyboard:  1 2 3 difficulty  ·  M deploy lane  ·  Enter play  ·  G guide  ·  H all shortcuts";
+  var kbLine = "Keyboard:  1 2 3 difficulty  ·  M deploy lane  ·  C custom  ·  Enter play  ·  H shortcuts";
   fitFont(kbLine, bw - 6 * ui, 12.5 * ui);
   ctx.fillStyle = "#6b7699";
   ctx.fillText(kbLine, bx + 6 * ui, y + 6 * ui);
@@ -2500,6 +2695,7 @@ function drawMenu() {
   ctx.textBaseline = "alphabetic";
 
   if (G.guideOpen) drawGuideModal();
+  if (G.tweaksOpen) drawTweakModal();
 
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
@@ -2612,6 +2808,7 @@ var HELP_ROWS = [
     ["F", "switch 1x / 2x speed"]
   ]],
   ["Always", [
+    ["C", "custom panel \u2014 rig any value, god mode"],
     ["H  or  ?", "show / hide this list"],
     ["Esc", "close this list"]
   ]]
@@ -2698,6 +2895,225 @@ function drawHelpModal() {
   ctx.textBaseline = "alphabetic";
   pushButton({ id: "help-close", x: 0, y: 0, w: W, h: H,
                action: function () { setHelp(false); } });
+}
+
+/* --- custom / god mode panel --- */
+var tweakRows = [];      // rebuilt every render() while the panel is open
+var tweakDrags = [];     // the slider tracks, so a drag can drive them
+
+function drawTweakRow(row, x, y, w, h, index) {
+  var ui = L.ui;
+  var key = row[2], kind = row[3];
+  var cy = y + h / 2;
+  var sel = (G.tweakRow === index);
+  var changed = (kind !== "act") && (TWEAKS[key] !== TWEAK_DEFAULTS[key]);
+  var cy2 = cy + 1;
+
+  tweakRows.push({ key: key, kind: kind, index: index });
+
+  ctx.save();
+  ctx.textBaseline = "middle";
+  if (sel) {
+    ctx.fillStyle = "rgba(23,53,156,0.08)";
+    roundRectPath(ctx, x - 4 * ui, y + 1 * ui, w + 8 * ui, h - 2 * ui, 5 * ui);
+    ctx.fill();
+  }
+
+  var bsz = Math.min(22 * ui, h - 6 * ui);
+  var plusX = x + w - bsz - 4 * ui;
+  var trackW = Math.min(76 * ui, w * 0.20);
+  var trackX = plusX - 8 * ui - trackW;
+  var minusX = trackX - 8 * ui - bsz;
+
+  ctx.textAlign = "left";
+  if (kind !== "act") {
+    ctx.fillStyle = changed ? C.blueDeep : "#16234c";
+    fitFont(row[1], Math.max(60 * ui, minusX - 66 * ui - (x + 6 * ui)), 14 * ui);
+    ctx.fillText(row[1], x + 6 * ui, cy2);
+  }
+
+  if (kind === "act") {
+    var aw = Math.min(190 * ui, w - 12 * ui);
+    var ax = x + w - aw - 6 * ui, ah = Math.min(26 * ui, h - 4 * ui);
+    var danger = (key === "reset");
+    ctx.fillStyle = danger ? "#fffef8" : C.blue;
+    roundRectPath(ctx, ax, cy - ah / 2, aw, ah, ah / 2);
+    ctx.fill();
+    ctx.strokeStyle = danger ? C.red : C.blueDeep;
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.textAlign = "center";
+    ctx.fillStyle = danger ? C.red : "#fff";
+    fitFont(row[1], aw - 14 * ui, 13 * ui);
+    ctx.fillText(row[1], ax + aw / 2, cy2);
+    pushButton({ id: "tw-" + key, x: ax, y: cy - ah / 2, w: aw, h: ah,
+                 action: function () { setTweak(key, 0); } });
+  } else if (kind === "toggle") {
+    var on = !!TWEAKS[key];
+    var tw2 = 64 * ui, th2 = Math.min(24 * ui, h - 4 * ui);
+    var tx = x + w - tw2 - 4 * ui;
+    ctx.fillStyle = on ? "#ffd54a" : "#fffef8";
+    roundRectPath(ctx, tx, cy - th2 / 2, tw2, th2, th2 / 2);
+    ctx.fill();
+    ctx.strokeStyle = on ? "#0e2270" : "#8b93a8";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#16234c";
+    fitFont(on ? "开 ON" : "关 OFF", tw2 - 10 * ui, 12.5 * ui);
+    ctx.fillText(on ? "开 ON" : "关 OFF", tx + tw2 / 2, cy2);
+    pushButton({ id: "tw-" + key, x: tx, y: cy - th2 / 2, w: tw2, h: th2,
+                 action: function () { stepTweak(key, 1); } });
+  } else {
+    // value, then [−] [slider] [+]
+    ctx.textAlign = "right";
+    ctx.font = "bold " + Math.round(13 * ui) + "px " + FONT;
+    ctx.fillStyle = changed ? C.blueDeep : "#3a4668";
+    ctx.fillText(tweakText(key), minusX - 8 * ui, cy2);
+
+    var s;
+    for (s = 0; s < 2; s++) {
+      var bx = s === 0 ? minusX : plusX;
+      ctx.fillStyle = "#fffef8";
+      roundRectPath(ctx, bx, cy - bsz / 2, bsz, bsz, 4 * ui);
+      ctx.fill();
+      ctx.strokeStyle = "#42527e";
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#16234c";
+      ctx.font = "bold " + Math.round(bsz * 0.72) + "px " + FONT;
+      ctx.fillText(s === 0 ? "\u2212" : "+", bx + bsz / 2, cy2);
+      (function (k2, d2, rx, ry) {
+        pushButton({ id: "tw" + d2 + "-" + k2, x: rx, y: ry, w: bsz, h: bsz,
+                     action: function () { stepTweak(k2, d2); } });
+      })(key, s === 0 ? -1 : 1, bx, cy - bsz / 2);
+    }
+
+    var frac = clamp((TWEAKS[key] - row[4]) / (row[5] - row[4]), 0, 1);
+    var trackY = cy - 4 * ui, trackH = 8 * ui;
+    ctx.fillStyle = "rgba(29,43,85,0.14)";
+    roundRectPath(ctx, trackX, trackY, trackW, trackH, trackH / 2);
+    ctx.fill();
+    ctx.fillStyle = changed ? C.blueMid : "#8fa2cc";
+    roundRectPath(ctx, trackX, trackY, Math.max(trackH, trackW * frac), trackH, trackH / 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(29,43,85,0.35)";
+    ctx.lineWidth = 1;
+    roundRectPath(ctx, trackX, trackY, trackW, trackH, trackH / 2);
+    ctx.stroke();
+    tweakDrags.push({ key: key, min: row[4], max: row[5], step: row[6],
+                      x: trackX, y: cy - 11 * ui, w: trackW, h: 22 * ui });
+  }
+  ctx.restore();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+function drawTweakModal() {
+  var ui = L.ui;
+  tweakRows = [];
+  tweakDrags = [];
+
+  // Registered FIRST so that every control below wins the backwards hit-test scan.
+  // The full-screen dismiss must be the last resort, not the first match.
+  pushButton({ id: "tweak-close", x: 0, y: 0, w: W, h: H,
+               action: function () { setTweaks(false); } });
+
+  ctx.save();
+  ctx.fillStyle = "rgba(236,241,248,0.88)";
+  ctx.fillRect(0, 0, W, H);
+
+  var twoCol = W >= 740;
+  var cols = twoCol ? [["you"], ["foe", "match"]] : [["you", "foe", "match"]];
+  var hdrH = 26 * ui, chromeH = 106 * ui, gapG = 12 * ui, rowPad = 4 * ui;
+  var ci, gi, ri, k;
+
+  function groupCount(g) {
+    var n = 0;
+    for (var i = 0; i < TWEAK_ROWS.length; i++) if (TWEAK_ROWS[i][0] === g) n++;
+    return n;
+  }
+  var maxRows = 0, maxHdrs = 0;
+  for (ci = 0; ci < cols.length; ci++) {
+    var n = 0;
+    for (gi = 0; gi < cols[ci].length; gi++) n += groupCount(cols[ci][gi]);
+    if (n > maxRows) maxRows = n;
+    if (cols[ci].length > maxHdrs) maxHdrs = cols[ci].length;
+  }
+  var avail = H * 0.90 - chromeH - maxHdrs * hdrH - (maxHdrs - 1) * gapG;
+  var rowH = clamp(avail / Math.max(1, maxRows), 19 * ui, 38 * ui);
+
+  var pw = Math.min(W * 0.95, (twoCol ? 940 : 480) * ui);
+  var colGap = 20 * ui;
+  var colW = twoCol ? (pw - colGap * 3) / 2 : pw - colGap * 2;
+  var contentH = maxHdrs * hdrH + (maxHdrs - 1) * gapG + maxRows * rowH;
+  var ph = Math.min(H * 0.95, contentH + chromeH);
+  var px = (W - pw) / 2, py = Math.max(5 * ui, (H - ph) / 2);
+
+  ctx.fillStyle = "rgba(255,254,248,0.98)";
+  roundRectPath(ctx, px, py, pw, ph, 10 * ui);
+  ctx.fill();
+  ctx.strokeStyle = "#1d2b55";
+  ctx.lineWidth = 2.2;
+  sketchRoundRect(ctx, px, py, pw, ph, 10 * ui, 31337, 1.4);
+
+  ctx.fillStyle = C.tape;
+  ctx.save();
+  ctx.translate(px + pw / 2, py + 4 * ui);
+  ctx.rotate(-0.025);
+  ctx.fillRect(-46 * ui, -8 * ui, 92 * ui, 16 * ui);
+  ctx.strokeStyle = C.tapeLine;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-46 * ui, -8 * ui, 92 * ui, 16 * ui);
+  ctx.restore();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "bold " + Math.round(21 * ui) + "px " + FONT;
+  ctx.fillStyle = C.blue;
+  ctx.fillText("自定义 · Custom", px + pw / 2, py + 38 * ui);
+  ctx.font = "bold " + Math.round(12.5 * ui) + "px " + FONT;
+  ctx.fillStyle = "#4a5578";
+  fitFont("随便调,想怎么无敌就怎么无敌 \u00b7 bend the rules \u2014 the whole game, yours to rig",
+          pw - 50 * ui, 12.5 * ui);
+  ctx.fillText("随便调,想怎么无敌就怎么无敌 \u00b7 bend the rules \u2014 the whole game, yours to rig",
+               px + pw / 2, py + 58 * ui);
+
+  var y0 = py + 76 * ui;
+  for (ci = 0; ci < cols.length; ci++) {
+    var cx = px + colGap + ci * (colW + colGap);
+    var yy = y0;
+    for (gi = 0; gi < cols[ci].length; gi++) {
+      var g = cols[ci][gi], gLabel = g;
+      for (k = 0; k < TWEAK_GROUPS.length; k++) if (TWEAK_GROUPS[k][0] === g) gLabel = TWEAK_GROUPS[k][1];
+      ctx.textAlign = "left";
+      ctx.font = "bold " + Math.round(13 * ui) + "px " + FONT;
+      ctx.fillStyle = g === "you" ? C.blue : (g === "foe" ? C.red : "#3a4668");
+      ctx.fillText(gLabel, cx, yy + 15 * ui);
+      yy += hdrH;
+      for (ri = 0; ri < TWEAK_ROWS.length; ri++) {
+        if (TWEAK_ROWS[ri][0] !== g) continue;
+        drawTweakRow(TWEAK_ROWS[ri], cx, yy, colW, rowH - rowPad, tweakRows.length);
+        yy += rowH;
+      }
+      yy += gapG;
+    }
+  }
+
+  ctx.textAlign = "center";
+  ctx.font = "bold " + Math.round(12 * ui) + "px " + FONT;
+  ctx.fillStyle = "#6b7699";
+  fitFont("改动只影响本次游玩,刷新页面就恢复出厂 \u00b7 in-memory only; reload to restore",
+          pw - 40 * ui, 12 * ui);
+  ctx.fillText("改动只影响本次游玩,刷新页面就恢复出厂 \u00b7 in-memory only; reload to restore",
+               px + pw / 2, py + ph - 30 * ui);
+  ctx.fillText("\u2191\u2193 pick  \u00b7  \u2190\u2192 or Space change  \u00b7  C / Esc close",
+               px + pw / 2, py + ph - 13 * ui);
+  ctx.restore();
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
 }
 
 /* --- game over --- */

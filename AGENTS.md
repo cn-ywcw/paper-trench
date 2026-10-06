@@ -21,20 +21,22 @@ These are requirements, not preferences. Breaking one breaks the deliverable.
 
 ## File map
 
-`paper-trench.html` (~2,770 lines) is organized by banner comments — jump by searching
+`paper-trench.html` (~3,230 lines) is organized by banner comments — jump by searching
 for the banner, not by line number:
 
 ```
-constants (31) · state (67) · helpers (114) · doodle drawing (150) · sizing (247)
-unit sprite (361) · data (454) · lifecycle (503) · spawning (550) · projectiles (697)
-combat (748) · fx (821) · update (837) · AI (1079) · input (1202)
-rendering (1409) → battlefield (1535) HUD (1828) bottom bar (1940) menu (2221)
-  hotkey help overlay (2597) game over (2703)
-loop (2774) · boot (2795)
+constants (31) · state (105) · helpers (156) · doodle drawing (192) · sizing (289)
+unit sprite (403) · data (496) · lifecycle (545) · spawning (592) · projectiles (744)
+combat (795) · fx (870) · update (886) · AI (1134) · input (1258)
+  custom / god mode logic (1280)
+rendering (1577) → battlefield (1704) HUD (1997) bottom bar (2115) menu (2396)
+  hotkey help overlay (2793) custom / god mode panel (2900) game over (3119)
+loop (3190) · boot (3211)
 ```
 
 Repo root also holds `preview-menu.png`, `preview-gameplay.png`, `preview-guide.png`,
-`preview-hotkeys.png`. There is no git repo, no package.json, no test directory.
+`preview-hotkeys.png`, `preview-custom.png`. There is no git repo, no package.json, no
+test directory.
 
 ## Verifying changes
 
@@ -99,6 +101,14 @@ Do not rediscover these.
   `sleep()` really does advance the match (that is how the previews are shot). The moment
   you add `--virtual-time-budget`, frames stop carrying a usable `dt` and mid-match states
   must be reached by calling `PT.update(dt)` directly instead.
+- **A probe copy for the browser must KEEP `requestAnimationFrame(frame)`.** The vm
+  harness recipe deliberately drops it; copy that tail into a `file://` probe and the
+  page boots to a dead canvas — `G.t` never advances, `buttons` stays empty, and every
+  coordinate you read back is from the boot frame. Symptom: "panel is open but 0 rows".
+- **`hitButton()` scans backwards, so a full-screen dismiss swallows everything.** Register
+  the "click outside to close" button *before* the panel's own controls, or in a panel
+  that has controls (the custom panel) every click resolves to it and the panel just
+  closes. Slider tracks are not buttons at all — check `hitDrag()` before `hitButton()`.
 - **`--window-size` is the outer window, not the canvas.** Headless Chrome reports
   `innerWidth = width - 16` and `innerHeight = height - 95`, so the reference 1032×582
   layout needs `--window-size=1048,677`. Check `innerWidth+'x'+innerHeight` before
@@ -197,6 +207,17 @@ Do not rediscover these.
 - **Ink is the only resource.** Cap 10, regen `PLAYER_REGEN`. A unit that cannot spawn
   (40-per-side cap) must not consume ink — spawn first, deduct only on success, and show
   a hint.
+- **The custom panel must be identity by default.** `TWEAK_DEFAULTS` is the shipped game,
+  and `TWEAKS` is a mutable copy of it. Every knob is read at exactly one place —
+  `spawnUnit` (hp/dmg/range/speed multipliers), `damageUnit`/`damageHQ` (invincible),
+  `update` (ink, timer), `updateAI` (no reinforcements), `startGame` (clock, ink, HQ hp) —
+  so there is no second code path to keep in sync, and a rule test that never touches the
+  panel is testing the real game. The suite asserts this: with defaults, the 13 locked
+  duel outcomes and all four stand-off distances are unchanged. `anyTweak()` drives the
+  HUD badge, so a player can never quietly forget that the game is rigged.
+- **Tweaks live in memory only.** No `localStorage` — a single-file game opened over
+  `file://` may not have it, and a silent storage failure is worse than a reset. Reloading
+  the page is the documented way back to defaults.
 
 ## Tuning reference
 
@@ -252,7 +273,14 @@ sandbox only when comparing two arms inside one process; for absolute win rates 
   rendering or hit tests; multiply by `L.ui`.
 - **Buttons are rebuilt every `render()`** into the `buttons` array via `pushButton()`,
   and hit-tested by scanning backwards in `hitButton()`. Set `BTN_ON = false` to suppress
-  registration for an inactive screen (the game-over screen relies on this).
+  registration for an inactive screen (the game-over screen relies on this). Order
+  matters: the last thing pushed wins, so a modal's own controls go **after** its
+  click-outside dismiss, and non-button hit surfaces (the custom panel's sliders, held in
+  `tweakDrags`) are tested separately and first.
+- **Panels that pause use the `helpPaused` pattern.** `setHelp()` / `setTweaks()` record
+  that *they* paused the match in `G.helpPaused` / `G.tweakPaused`, so closing a panel that
+  was opened while already paused leaves it paused. `drawGame()` suppresses the PAUSED
+  overlay while either panel is up.
 - **Seeded jitter, never `Math.random()` in rendering.** `mulberry32` + `hashStr` give
   doodle wobble that is stable across frames. Randomness per frame makes the art crawl.
 - **Scratch files get a leading underscore** (`_harness.js`, `_probe.js`, `_crop.png`) and

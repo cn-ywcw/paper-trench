@@ -111,9 +111,11 @@ AI 会真的"看"你的部队组成：它会数你场上有多少坦克、多少
 | | `Enter` | 开始游戏 |
 | | `M` | 切换 手动 / 自动 出兵位置 |
 | | `G` | 打开单位图鉴 |
+| | `C` | 打开自定义面板（无敌版） |
 | 对局 | `1` – `5` | 立即出兵（对应卡片序号） |
 | | `Space` | 重复上一次出兵，可以按住连点 |
 | | `M` | 切换 手动 / 自动 出兵位置 |
+| | `C` | 打开自定义面板（无敌版，会自动暂停） |
 | | `←↑↓→` / `WASD` | 瞄准车道（仅手动模式；自动模式下按了会提示） |
 | | `Shift` + 方向 | 瞄得更快 |
 | | `Esc` / `P` | 暂停 / 继续 |
@@ -125,6 +127,24 @@ AI 会真的"看"你的部队组成：它会数你场上有多少坦克、多少
 
 > 两种模式都没有"第二次点击"：点卡片就是出兵。手动模式记的是**鼠标最后停在战场上的位置**，所以指针移到卡片上时车道不会跑掉，也不会因为手抖把兵丢在角落。
 
+## 自定义 · 无敌版
+
+菜单里点「Custom · 自定义」，或者对局中随时按 `C`。面板会打开并**自动暂停**，改完关掉继续打——所有改动**立刻生效**，包括正在进行的这一局。
+
+| 组 | 能调什么 |
+|---|---|
+| **你 YOU** | 无敌（单位和 HQ 完全不吃伤害）、无限墨水、回墨速度 0.25×–4×、起始墨水 0–10、伤害/生命/射程/速度 0.5×–5× |
+| **敌 ENEMY** | 伤害 0.2×–3×、生命 0.2×–3×、停止出兵（AI 完全不出兵，适合当靶场） |
+| **战场 MATCH** | 时长 15s–600s 或**无限**、HQ 血量 200–20000、立即胜利、全部重置 |
+
+操作：鼠标点 `−` / `+`，或者**直接拖滑块**；也可以 `↑↓` 选行、`←→` / `Space` 改值。改动过的项会变蓝，HUD 上会出现红色的 `CUSTOM` 标记，菜单里的 Custom 按钮也会亮起来——所以永远不会忘记自己开了挂。
+
+几条实现上的说明：
+
+- **出厂即原版。** 每一项默认都是"不变"（1×、关闭、180s、3000 血），所以不改动时游戏和你平时玩的一模一样
+- **单位数值只对之后部署的单位生效**（伤害/生命/射程/速度是在出兵那一刻写进单位的）；无敌、无限墨水、时长、AI、HQ 血量都是实时的
+- **改动只在内存里**，刷新页面就恢复出厂设置——不写 localStorage，因为单文件走 `file://` 打开时那个 API 不一定可用
+
 ## 截图
 
 | 主菜单 | 单位图鉴 |
@@ -132,6 +152,8 @@ AI 会真的"看"你的部队组成：它会数你场上有多少坦克、多少
 | ![主菜单](preview-menu.png) | ![单位图鉴](preview-guide.png) |
 
 ![快捷键面板](preview-hotkeys.png)
+
+![自定义面板](preview-custom.png)
 
 ## 技术说明
 
@@ -157,6 +179,7 @@ preview-menu.png       截图
 preview-gameplay.png
 preview-guide.png
 preview-hotkeys.png
+preview-custom.png
 ```
 
 ## English
@@ -184,6 +207,10 @@ doodle style. Blue ink is you, red ink is the enemy.
   tanks shell MGs from 96 away, artillery out-ranges everything including the HQ
   watchtower, Ink Splash answers clumped pushes)
 - **3 AI difficulties**; the AI reads your army composition and counter-picks
+- **Custom panel / god mode** (`C`, or the menu): invincible, infinite ink, ink regen,
+  starting ink, damage/health/range/speed multipliers for either side, no enemy
+  reinforcements, any match length or none, HQ health, instant win, reset. Every value is
+  identity by default, changes apply live, and a red `CUSTOM` badge shows on the HUD
 - Full keyboard support: play an entire match without a mouse (`H` lists every shortcut)
 
 Built with plain ES5 and Canvas 2D. All art is drawn at runtime — there are no image,

@@ -49,7 +49,9 @@
 
 ## 单位
 
-点击底部卡片选中，再点击自己的蓝色领土派出（只会决定**车道**，部队统一从自家防线出发）。
+点一下底部的卡片，部队就已经上路了——**只需要点一下**，不需要再点战场。
+
+出兵位置全部自动决定：部队统一从自家**防线**出发，车道由系统选择（优先补向敌人推进最狠的位置，并自动避开已经扎堆的地方）；墨水泼溅也自动瞄准敌人最密集的一团。你只需要决定**什么时候、出什么兵**。
 
 | 单位 | 墨水 | 生命 | 伤害 | 攻击间隔 | 射程 | 速度 | 定位 |
 |---|---|---|---|---|---|---|---|
@@ -57,7 +59,7 @@
 | 机枪 Machine Gun | 2 | 92 | 6 | 0.20s | 122 | 14 | 射程长、射速快，压制成群步兵 |
 | 坦克 Tank | 3 | 200 | 34 | 1.05s | 44 | 20 | 重甲矛头，能扛炮弹、拆 HQ |
 | 火炮 Artillery | 4 | 74 | 100 | 2.6s | 260 | 10 | 唯一的攻城炮，射程超过 HQ 瞭望塔（260 > 195），可安全轰基地，但被近身就死 |
-| 墨水泼溅 Ink Splash | 5 | — | 175 | 瞬发 | 半径 122 | — | 点任意位置，对整条战壕纵列造成伤害，即使敌人站在自己领土上也照打 |
+| 墨水泼溅 Ink Splash | 5 | — | 175 | 瞬发 | 半径 122 | — | 自动瞄准最密集的一团，对整条战壕纵列造成伤害，即使敌人站在自己领土上也照打 |
 
 单位之间存在刻意的**克制三角**，不是数值越大越强：
 
@@ -87,20 +89,16 @@ AI 会真的"看"你的部队组成：它会数你场上有多少坦克、多少
 | | `←` `→` | 循环切换难度 |
 | | `Enter` | 开始游戏 |
 | | `G` | 打开单位图鉴 |
-| 对局 | `1` – `5` | 选择单位卡 |
-| | `Q` / `E` | 上一张 / 下一张卡 |
-| | `←↑↓→` / `WASD` | 移动准星 |
-| | `Shift` + 方向 | 准星快速移动 |
-| | `Space` | 在准星位置出兵 |
-| | `Esc` | 取消选择 |
-| | `P` | 暂停 |
+| 对局 | `1` – `5` | 立即出兵（对应卡片序号） |
+| | `Space` | 重复上一次出兵，可以按住连点 |
+| | `Esc` / `P` | 暂停 / 继续 |
 | | `F` | 1× / 2× 速度切换 |
 | 通用 | `H` 或 `?` | 快捷键面板（自动暂停对局） |
 | | `Esc` | 关闭面板 |
 
-用键盘出兵时，画面上会显示准星、虚线防线和待部署单位的半透明预览；选中墨水泼溅时会显示将被泼中的整条战壕纵列。
+战场上那条虚线就是**防线**，线上的箭头标出下一次出兵会走哪条车道，每次出兵都会在原地画一个圈作为反馈。
 
-> `Space` 出兵后会**保留选中的卡片**，方便连续出兵；鼠标点击战场则清除选择，避免误触浪费墨水。
+> 落点由系统自动选择：优先补向敌人推进最狠的车道，同时自动避开已经扎堆的位置。所以没有"第二次点击"，也不会因为手抖把兵丢在角落。
 
 ## 截图
 
@@ -145,8 +143,8 @@ doodle style. Blue ink is you, red ink is the enemy.
   `paper-trench.html` locally; no build step, no server, no network
 - A match lasts **3 minutes**. Win by holding **more than 50% of the territory** at time
   up, or by **destroying the red HQ** early
-- **Ink** is the only resource (cap 10). Deploy from the bottom bar by clicking a card
-  then clicking your blue soil
+- **Ink** is the only resource (cap 10). **One click on a card deploys** — there is no
+  second click on the battlefield; the lane and the blot's target are picked for you
 - You take **50% less damage standing on your own territory** — true for both sides
 - The front line moves in real time, driven by the three deepest units of each army
 - **5 units** with an intentional counter-triangle (soldiers swarm, MGs shred infantry,

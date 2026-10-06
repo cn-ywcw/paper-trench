@@ -21,16 +21,16 @@ These are requirements, not preferences. Breaking one breaks the deliverable.
 
 ## File map
 
-`paper-trench.html` (~2,660 lines) is organized by banner comments — jump by searching
+`paper-trench.html` (~2,600 lines) is organized by banner comments — jump by searching
 for the banner, not by line number:
 
 ```
-constants (31) · state (64) · helpers (106) · doodle drawing (130) · sizing (227)
-unit sprite (341) · data (434) · lifecycle (483) · spawning (529) · projectiles (608)
-combat (659) · fx (723) · update (739) · AI (958) · input (1081)
-rendering (1273) → battlefield (1418) HUD (1711) bottom bar (1823) menu (2096)
-  hotkey help overlay (2445) game over (2549)
-loop (2620) · boot (2641)
+constants (31) · state (64) · helpers (105) · doodle drawing (129) · sizing (226)
+unit sprite (340) · data (433) · lifecycle (482) · spawning (525) · projectiles (668)
+combat (719) · fx (783) · update (799) · AI (1018) · input (1141)
+rendering (1292) → battlefield (1366) HUD (1659) bottom bar (1771) menu (2027)
+  hotkey help overlay (2376) game over (2478)
+loop (2549) · boot (2570)
 ```
 
 Repo root also holds `preview-menu.png`, `preview-gameplay.png`, `preview-guide.png`,
@@ -53,11 +53,15 @@ internals instead of starting the render loop:
 // with:
 G.ink = 10;
 window.__PT = { G: G, L: L, update: update, render: render, resize: resize,
-                gameClick: gameClick, spawnUnit: spawnUnit, UNITS: UNITS,
+                deployCard: deployCard, spawnUnit: spawnUnit, UNITS: UNITS,
                 DIFFS: DIFFS, ORDER: ORDER, countSide: countSide, W: function(){return W;},
                 H: function(){return H;} };
 // do NOT call requestAnimationFrame
 ```
+
+Everything a test needs goes through `deployCard(key)` — the same single entry point the
+cards and the hotkeys use. There is no separate "click on the field" path to call any
+more, so a rule test cannot accidentally exercise a code path the player never touches.
 
 Stub the canvas and 2D context with a `Proxy` that returns a no-op function for any
 method and swallows any property set, so `render()` runs without a DOM. Three methods
@@ -85,9 +89,15 @@ proof that a click works.
 
 Do not rediscover these.
 
-- **Headless virtual time leaves `dt ≈ 0` for rAF callbacks.** Screenshots of a
-  mid-match state must advance the sim by calling `PT.update(dt)` directly, never by
-  waiting on animation frames.
+- **Headless virtual time leaves `dt ≈ 0` for rAF callbacks.** Under plain
+  `--headless=new` with no virtual time policy the game loop runs on the wall clock and
+  `sleep()` really does advance the match (that is how the previews are shot). The moment
+  you add `--virtual-time-budget`, frames stop carrying a usable `dt` and mid-match states
+  must be reached by calling `PT.update(dt)` directly instead.
+- **`--window-size` is the outer window, not the canvas.** Headless Chrome reports
+  `innerWidth = width - 16` and `innerHeight = height - 95`, so the reference 1032×582
+  layout needs `--window-size=1048,677`. Check `innerWidth+'x'+innerHeight` before
+  trusting any screenshot's geometry.
 - **A measurement harness must let the front line move.** Pinning `frontX` to a fixed x
   gives one side the 50% home-soil bonus and denies it to the other, which silently
   doubles one army's effective HP and makes every duel favour the defender. Let
@@ -117,9 +127,17 @@ Do not rediscover these.
 - **50% damage reduction on your own soil** is a spec requirement, not a tuning knob.
   It applies to whichever side is behind `frontX`.
 - **Both armies deploy from their own defence line**, `DEPLOY_LINE = 68` px behind the
-  HQ. A mouse click or the keyboard cursor selects the **lane (y)** only. If
-  click-to-place at an arbitrary x is ever wanted, change `playerSpawnX()` — nothing else
-  depends on the click's x.
+  HQ. **Deploying is a single action**: the cards, `1`–`5` and `Space` all call
+  `deployCard(key)` and the unit is on its way — there is no second click on the
+  battlefield. `autoLane()` picks the lane, `autoBlotTarget()` picks the blot's target.
+  Keep the battlefield click-free apart from the "tap a card" hint; a click that silently
+  places a unit at the pointer is the bug this design replaced.
+- **`autoLane()` must stay deterministic and y-only.** It scores nine candidate lanes by
+  "distance from the enemy's ink-weighted push" minus "crowding from our own units", and
+  `spawnUnit(side, type, x, preferY)` honours an explicit lane exactly (only the AI, which
+  passes none, lets `pickLane()` scatter). A lane that shifts between frames reads as a
+  bug, and a half-honoured `preferY` blend reintroduces the "my click did nothing"
+  complaint.
 - **Balance invariant: `Q = hp * dps / cost²`** must be roughly equal across units, so
   two armies spending equal ink trade evenly. Q was the metric that exposed artillery
   being unplayable (Q 138) and the tank being unkillable (Q 909). Re-derive Q whenever
@@ -153,6 +171,14 @@ Difficulty ladder was verified over 5 seeded full matches per difficulty: recrui
 ladder after any change to `UNITS`, `DIFFS`, or `PLAYER_REGEN` — difficulty drifts
 easily and one income retune already had to be walked back.
 
+The ladder is also the A/B rig for **placement** changes, because a harness with a fixed
+`Math.random` stream is not comparable to an earlier run with a different one. Seed the
+sandbox only when comparing two arms inside one process; for absolute win rates leave
+`Math` alone and use ≥10 matches per difficulty. The one-tap-deploy change was measured
+that way (real randomness, 10 matches, same proxy, only the placement rule swapped):
+auto-lane 8/10 recruit, 2/10 sergeant, 0/10 general versus `pickLane` scattering at
+9/10, 1/10, 0/10 — indistinguishable, so auto-placement did not move the balance.
+
 ## Conventions
 
 - **Layout scales from one factor.** `L.ui = clamp(min(W/1032, H/582), 0.62, 1.55)`.
@@ -167,7 +193,8 @@ easily and one income retune already had to be walked back.
   are deleted before presenting anything. The tree must contain only
   `paper-trench.html`, `AGENTS.md`, and `preview-*.png`.
 - **Keyboard and mouse are both first-class.** Every action reachable by click must be
-  reachable by keyboard, and the mouse must be able to take over from the keyboard
-  cursor at any moment. `G.kb = {active, x, y}` tracks the keyboard aim cursor; the
-  mouse path clears `selected` after deploying while the keyboard path keeps it so
-  `Space` can be held down.
+  reachable by keyboard, and both routes must funnel through `deployCard(key)` so they
+  cannot drift apart. `G.lastKey` remembers the last card used; `Space` repeats it, which
+  is how a player holds a push together. There is no aim cursor any more — arrow and WASD
+  presses just raise `DEPLOY_HINT` so the old muscle memory gets an explanation instead of
+  silence.

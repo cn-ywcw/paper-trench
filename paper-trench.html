@@ -82,13 +82,12 @@ var G = {
   projs: [],
   fx: [],
   decor: [],
-  selected: null,
+  lastKey: "soldier",    // Space repeats whatever you deployed last
   playerHQ: null,
   enemyHQ: null,
   aiTimer: 0,
   t: 0,
   mouse: { x: -9999, y: -9999 },
-  kb: { active: false, x: 0, y: 0 },   // keyboard aim cursor
   helpOpen: false,
   helpPaused: false,
   hint: "",
@@ -469,7 +468,7 @@ var UNITS = {
   ink: {
     key: "ink", name: "Ink Splash", cn: "墨水泼溅", cost: 5,
     hp: 0, speed: 0, range: 0, dmg: 175, rate: 0, radius: 122, instant: true,
-    desc: "Instant. Tap anywhere on the field: 175 damage across a whole trench column — wipes out infantry, even on their own soil."
+    desc: "Instant. Auto-aimed at the enemy's biggest knot: 175 damage across a whole trench column — wipes out infantry, even on their own soil."
   }
 };
 var ORDER = ["soldier", "mg", "tank", "artillery", "ink"];
@@ -492,7 +491,7 @@ function startGame(diff) {
   G.units = [];
   G.projs = [];
   G.fx = [];
-  G.selected = null;
+  G.lastKey = "soldier";
   G.result = null;
   G.endReason = "";
   G.aiTimer = 2.0;
@@ -500,7 +499,6 @@ function startGame(diff) {
   G.hint = "";
   G.hintT = 0;
   G.helpOpen = false;
-  G.kb.active = false;
   uid = 1;
 
   var f = L.field;
@@ -510,8 +508,6 @@ function startGame(diff) {
   G.enemyHQ  = { side: "red",  isHQ: true, x: W - m, y: f.y + f.h / 2, hp: HQ_HP, maxHp: HQ_HP, flash: 0,
                  range: HQ_RANGE * L.ui, turretT: 0.6, calm: 0 };
   G.frontX = W / 2;
-  G.kb.x = G.playerHQ.x + DEPLOY_LINE * L.ui;
-  G.kb.y = f.y + f.h / 2;
 }
 
 function endGame(reason) {
@@ -560,10 +556,13 @@ function spawnUnit(side, type, x, preferY) {
   var mul = side === "red" ? DIFFS[G.diff].stat : 1;
   var f = L.field;
   var pad = 18 * L.ui;
-  var lane = pickLane(side, x);
+  // An explicit lane is honoured exactly — the player's auto-lane is a decision,
+  // not a suggestion. Only the AI scouts for a gap with pickLane().
+  var lane;
   if (typeof preferY === "number" && isFinite(preferY)) {
-    // blend the player's click with the anti-crowding pick
-    lane = (clamp(preferY, f.y + pad, f.y + f.h - pad) + lane) / 2;
+    lane = clamp(preferY, f.y + pad, f.y + f.h - pad);
+  } else {
+    lane = pickLane(side, x);
   }
   var u = {
     id: uid++, side: side, key: type, isHQ: false,
@@ -603,6 +602,67 @@ function enemySpawnX() {
   // enemy troops march out of their own defence line on the far right — they no
   // longer materialise next to the front.
   return clamp(Math.max(deployLineX("red"), G.frontX + 24 * L.ui), 12, W - 14);
+}
+
+// One tap = one unit on the field, so the lane has to be chosen for the player.
+// Reinforce where the enemy is actually leaning, and refuse to stack: the score is
+// "how close to the threatened lane" minus "how crowded with our own troops".
+// Deterministic on purpose — a lane that jitters between frames reads as a bug.
+function autoLane() {
+  var f = L.field, ui = L.ui;
+  var pad = 26 * ui;
+  var top = f.y + pad, bot = f.y + f.h - pad;
+  if (bot <= top) return f.y + f.h / 2;
+  var rad = clamp(f.h * 0.20, 40 * ui, 110 * ui);
+
+  // The lane the enemy is leaning on: weight each red unit by how deep into our
+  // half it has pushed, so a breakthrough outranks a skirmish at the line.
+  var ty = 0, tw = 0, i, u;
+  for (i = 0; i < G.units.length; i++) {
+    u = G.units[i];
+    if (u.side !== "red") continue;
+    var press = 1 + clamp((G.frontX - u.x) / Math.max(1, G.frontX), 0, 1) * 1.8;
+    ty += u.y * press;
+    tw += press;
+  }
+  if (tw <= 0) ty = f.y + f.h / 2; else ty /= tw;
+
+  var best = clamp(ty, top, bot), bestScore = -1e9;
+  for (var s = 0; s < 9; s++) {
+    var y = top + (bot - top) * (s / 8);
+    var score = -Math.abs(y - ty) * 0.9;
+    for (i = 0; i < G.units.length; i++) {
+      u = G.units[i];
+      if (u.side !== "blue") continue;
+      var d = Math.abs(u.y - y);
+      if (d < rad) score -= (rad - d) * 0.55;
+    }
+    if (score > bestScore) { bestScore = score; best = y; }
+  }
+  return clamp(best, top, bot);
+}
+
+// Same problem for the blot: the player picked "ink this knot", not "ink x=417".
+// Densest cluster of red shirts wins; ties break towards the one nearest our HQ.
+function autoBlotTarget() {
+  var ui = L.ui;
+  var reach = UNITS.ink.radius * ui;
+  var best = null, bestScore = -1e9;
+  for (var i = 0; i < G.units.length; i++) {
+    var a = G.units[i];
+    if (a.side !== "red") continue;
+    var n = 0;
+    for (var j = 0; j < G.units.length; j++) {
+      var b = G.units[j];
+      if (b.side !== "red") continue;
+      if (Math.abs(a.x - b.x) < reach && Math.abs(a.y - b.y) < 110 * ui) n++;
+    }
+    var score = n * 10 + (1 - clamp(a.x / W, 0, 1)) * 6;
+    if (score > bestScore) { bestScore = score; best = a; }
+  }
+  if (best) return { x: best.x, y: best.y };
+  // nothing on the field: ink the enemy watchtower rather than waste the ink
+  return { x: G.enemyHQ.x, y: G.enemyHQ.y };
 }
 
 /* ----------------------------- projectiles ----------------------------- */
@@ -1100,57 +1160,58 @@ function setHint(msg) {
   G.hintT = 2.0;
 }
 
-function selectCard(key) {
-  if (!UNITS[key]) return;
-  if (G.ink >= UNITS[key].cost) G.selected = (G.selected === key) ? null : key;
-  else setHint("墨水不足 · Not enough ink");
-}
+// Deploying costs exactly one action: pick a card and the unit is already on its
+// way. There is no second click on the battlefield — the lane, the marching order
+// and the blot's target are all chosen for the player.
+var DEPLOY_HINT = "按 1–5 或点卡片出兵 · Press 1–5 or tap a card to deploy";
 
-function gameClick(x, y, keepSelection) {
-  // battlefield only — the deployment bar is handled by its card buttons
-  if (y < L.field.y || y > L.field.y + L.field.h) return;
-
-  if (!G.selected) { setHint("先点选下方单位卡 · Pick a unit card first"); return; }
-  var def = UNITS[G.selected];
+function deployCard(key) {
+  if (G.screen !== "playing" || G.paused) return;
+  var def = UNITS[key];
+  if (!def) return;
   if (G.ink < def.cost) { setHint("墨水不足 · Not enough ink"); return; }
 
   if (def.instant) {
+    var t = autoBlotTarget();
     G.ink -= def.cost;
-    spawnInkBlot("blue", x, y, def.dmg, def.radius * L.ui);
-    G.selected = keepSelection ? G.selected : null;
+    G.lastKey = key;
+    spawnInkBlot("blue", t.x, t.y, def.dmg, def.radius * L.ui);
     return;
   }
 
-  if (x > G.frontX - 14 * L.ui) {
-    setHint("只能在蓝色领土部署 · Deploy on blue soil only");
+  if (countSide("blue") >= MAX_UNITS_PER_SIDE) {
+    setHint("部队已满 " + MAX_UNITS_PER_SIDE + " · Unit limit reached");
     return;
   }
   // Spawn first, pay only if a unit actually appeared.
-  var made = spawnUnit("blue", G.selected, playerSpawnX(), y);
+  var made = spawnUnit("blue", key, playerSpawnX(), autoLane());
   if (!made) {
     setHint("部队已满 " + MAX_UNITS_PER_SIDE + " · Unit limit reached");
     return;
   }
   G.ink -= def.cost;
-  G.selected = keepSelection ? G.selected : null;
+  G.lastKey = key;
+  ring(made.x, made.y, 30 * L.ui, C.blue);   // "it came out right here"
 }
 
 cvs.addEventListener("pointerdown", function (e) {
   e.preventDefault();
   var p = canvasPos(e);
   G.mouse.x = p.x; G.mouse.y = p.y;
-  G.kb.active = false;                 // the mouse takes over the aim
 
   var b = hitButton(p.x, p.y);
   if (b) { b.action(); return; }
 
-  if (G.screen === "playing" && !G.paused) gameClick(p.x, p.y);
+  // The battlefield itself no longer takes orders. Say so rather than look broken.
+  var f = L.field;
+  if (G.screen === "playing" && !G.paused && p.y >= f.y && p.y <= f.y + f.h) {
+    setHint(DEPLOY_HINT);
+  }
 });
 
 cvs.addEventListener("pointermove", function (e) {
   var p = canvasPos(e);
   G.mouse.x = p.x; G.mouse.y = p.y;
-  G.kb.active = false;                 // the mouse takes over the aim
 });
 
 cvs.addEventListener("pointerleave", function () {
@@ -1160,41 +1221,9 @@ cvs.addEventListener("pointerleave", function () {
 cvs.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 
 /* --------------------------- keyboard controls -------------------------
-   1-5      pick a unit card          arrows / WASD  move the aim cursor
-   Space    deploy at the cursor      Shift + move   move faster
-   Esc      cancel / close            P pause        F  1x / 2x speed
-   H or ?   this shortcut list        G unit guide   Enter play / again     */
-var MOVE_KEYS = {
-  ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
-  a: [-1, 0], d: [1, 0], w: [0, -1], s: [0, 1],
-  A: [-1, 0], D: [1, 0], W: [0, -1], S: [0, 1]
-};
-
-function moveAim(dx, dy, fast) {
-  var f = L.field;
-  if (!G.kb.active) {
-    // first key press: start from wherever the mouse was, if it is on the field
-    G.kb.active = true;
-    var m = G.mouse;
-    G.kb.x = (m.x > 0 && m.x < W) ? m.x : G.playerHQ.x + DEPLOY_LINE * L.ui;
-    G.kb.y = (m.y > f.y && m.y < f.y + f.h) ? m.y : f.y + f.h / 2;
-    if (G.selected && UNITS[G.selected].instant) return;   // don't also nudge on the first press
-  }
-  var step = (fast ? 46 : 15) * L.ui;
-  G.kb.x = clamp(G.kb.x + dx * step, 6, W - 6);
-  G.kb.y = clamp(G.kb.y + dy * step, f.y + 10 * L.ui, f.y + f.h - 10 * L.ui);
-}
-
-function keyboardDeploy() {
-  if (G.screen !== "playing" || G.paused) return;
-  if (!G.selected) { setHint("先点选单位卡 · Pick a unit card (1-5) first"); return; }
-  G.kb.active = true;
-  var def = UNITS[G.selected];
-  // troops always march from the deploy line, so only the lane comes from the cursor
-  gameClick(def.instant ? G.kb.x : playerSpawnX(), G.kb.y, true);
-  G.kb.active = true;                  // deploying by key keeps the card selected
-}
-
+   1-5      deploy that unit now     Space  deploy the same one again
+   P / Esc  pause / resume           F      1x / 2x speed
+   H or ?   this shortcut list       G unit guide   Enter play / again     */
 function setHelp(open) {
   G.helpOpen = open;
   if (open) {
@@ -1240,33 +1269,23 @@ window.addEventListener("keydown", function (e) {
   }
 
   // ---- in a match ----
-  if (k === "Escape") { G.selected = null; G.kb.active = false; return; }
-  if (key === "p") { G.paused = !G.paused; return; }
+  if (k === "Escape" || key === "p") { G.paused = !G.paused; return; }
   if (key === "f") { G.speed = G.speed === 1 ? 2 : 1; return; }
   if (key >= "1" && key <= "5") {
     var pick = ORDER[parseInt(key, 10) - 1];
-    if (pick) {
-      selectCard(pick);
-      if (G.selected && !G.kb.active) moveAim(0, 0, false);   // bring the cursor up
-    }
-    return;
-  }
-  if (key === "q" || key === "e") {                        // cycle cards
-    var idx = G.selected ? ORDER.indexOf(G.selected) : -1;
-    idx = (idx + (key === "e" ? 1 : ORDER.length - 1)) % ORDER.length;
-    selectCard(ORDER[idx]);
-    if (G.selected && !G.kb.active) moveAim(0, 0, false);
+    if (pick) deployCard(pick);
     return;
   }
   if (k === " " || k === "Enter") {
     e.preventDefault();
     if (G.paused) { G.paused = false; return; }
-    keyboardDeploy();
+    deployCard(G.lastKey);          // hold it down to keep the push coming
     return;
   }
-  if (MOVE_KEYS[k]) {
+  if (k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown" ||
+      key === "w" || key === "a" || key === "s" || key === "d") {
     e.preventDefault();
-    moveAim(MOVE_KEYS[k][0], MOVE_KEYS[k][1], e.shiftKey);
+    setHint(DEPLOY_HINT);           // the aim cursor is gone: the keys deploy now
   }
 });
 
@@ -1285,68 +1304,18 @@ function render() {
   if (G.helpOpen) { BTN_ON = true; drawHelpModal(); }
 }
 
-// Where a unit would land: the keyboard cursor when the player is on the keys,
-// otherwise the mouse pointer.
-function aimPoint() {
-  var f = L.field;
-  var src = G.kb.active ? G.kb : G.mouse;
-  var x = clamp(src.x, 0, W);
-  var y = clamp(src.y, f.y + 8 * L.ui, f.y + f.h - 8 * L.ui);
-  return { x: x, y: y, kb: G.kb.active };
-}
-
+// Deployment is automatic, so the battlefield's only job is to show *where* the
+// next tap will land: the defence line, and the lane autoLane() picked for it.
 function drawDeployGuide() {
-  var aim = aimPoint();
-  if (!G.selected) {
-    if (aim.kb) drawReticle(aim.x, aim.y, 30 * L.ui);
-    return;
-  }
   var ui = L.ui, f = L.field;
-  var def = UNITS[G.selected];
   var lx = G.playerHQ.x + DEPLOY_LINE * ui;
-  var my = aim.y;
+  var ly = autoLane();
 
   ctx.save();
   ctx.beginPath(); ctx.rect(0, f.y, W, f.h); ctx.clip();
 
-  if (def.instant) {
-    // show exactly which trench column the blot will ink
-    var band = def.radius * ui;
-    ctx.globalAlpha = 0.5;
-    ctx.fillStyle = "rgba(23,53,156,0.13)";
-    ctx.fillRect(aim.x - band, f.y, band * 2, f.h);
-    ctx.strokeStyle = C.blue;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([8 * ui, 6 * ui]);
-    ctx.beginPath();
-    ctx.moveTo(aim.x - band, f.y + 4);
-    ctx.lineTo(aim.x - band, f.y + f.h - 4);
-    ctx.moveTo(aim.x + band, f.y + 4);
-    ctx.lineTo(aim.x + band, f.y + f.h - 4);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.globalAlpha = 0.9;
-    ctx.beginPath();
-    ctx.arc(aim.x, my, 13 * ui, 0, 6.2832);
-    ctx.stroke();
-    ctx.strokeStyle = C.blueDeep;
-    ctx.beginPath();
-    ctx.moveTo(aim.x - 18 * ui, my); ctx.lineTo(aim.x + 18 * ui, my);
-    ctx.moveTo(aim.x, my - 18 * ui); ctx.lineTo(aim.x, my + 18 * ui);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = C.blue;
-    ctx.font = "bold " + Math.round(11 * ui) + "px " + FONT;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "alphabetic";
-    ctx.fillText("blot lands here", aim.x, f.y + 14 * ui);
-    ctx.restore();
-    ctx.textAlign = "left";
-    return;
-  }
-
-  // dashed line the troops will march out of
-  ctx.strokeStyle = "rgba(23,53,156,0.55)";
+  // dashed line every blue unit marches out of
+  ctx.strokeStyle = "rgba(23,53,156,0.5)";
   ctx.lineWidth = 2;
   ctx.setLineDash([7 * ui, 6 * ui]);
   ctx.beginPath();
@@ -1355,48 +1324,27 @@ function drawDeployGuide() {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // lane marker: where in the line this unit will march
-  ctx.strokeStyle = "rgba(23,53,156,0.85)";
+  // the lane the next unit will take — a chevron, so nobody reads it as a unit
+  ctx.globalAlpha = 0.45;
+  ctx.strokeStyle = "rgba(23,53,156,0.9)";
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(lx - 12 * ui, my);
-  ctx.lineTo(lx + 12 * ui, my);
+  ctx.moveTo(lx - 13 * ui, ly);
+  ctx.lineTo(lx + 13 * ui, ly);
+  ctx.moveTo(lx - 6 * ui, ly - 8 * ui);
+  ctx.lineTo(lx, ly - 2 * ui);
+  ctx.lineTo(lx + 6 * ui, ly - 8 * ui);
   ctx.stroke();
+  ctx.globalAlpha = 1;
 
-  // ghost of the unit about to appear
-  var sp = unitSprite(G.selected, "blue");
-  var s = sp.size * 0.78 * ui;
-  ctx.globalAlpha = 0.42;
-  ctx.drawImage(sp.canvas, lx - s / 2, my - s / 2, s, s);
-  ctx.globalAlpha = 0.9;
+  // label sits to the right of the line so the HQ wire never runs through it
   ctx.fillStyle = C.blue;
   ctx.font = "bold " + Math.round(11 * ui) + "px " + FONT;
-  ctx.textAlign = "center";
+  ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
-  ctx.fillText("deploy line", lx, f.y + 14 * ui);
+  ctx.fillText("防线 · deploy line", lx + 8 * ui, f.y + 14 * ui);
   ctx.restore();
   ctx.textAlign = "left";
-
-  // keyboard reticle
-  if (aim.kb) drawReticle(lx, my, s);
-}
-
-function drawReticle(x, y, s) {
-  var ui = L.ui;
-  ctx.save();
-  ctx.strokeStyle = "rgba(16,29,74,0.9)";
-  ctx.lineWidth = 2;
-  var r = Math.max(s * 0.55, 16 * ui);
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, 6.2832);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(x - r - 6 * ui, y); ctx.lineTo(x - r + 2 * ui, y);
-  ctx.moveTo(x + r - 2 * ui, y); ctx.lineTo(x + r + 6 * ui, y);
-  ctx.moveTo(x, y - r - 6 * ui); ctx.lineTo(x, y - r + 2 * ui);
-  ctx.moveTo(x, y + r - 2 * ui); ctx.lineTo(x, y + r + 6 * ui);
-  ctx.stroke();
-  ctx.restore();
 }
 
 function drawGame() {
@@ -1902,37 +1850,37 @@ function drawBar() {
   ctx.fillStyle = "#16234c";
   ctx.fillText(inkLabel, W / 2, my + mh / 2 + 1);
 
-  // ---- prompt: drawn ABOVE the tray, over the bottom of the field, so the
-  // unit cards can never cover it
-  if (G.selected) {
-    var pfs = Math.round(15 * ui);
-    ctx.font = "bold " + pfs + "px " + FONT;
-    var prompt = UNITS[G.selected].instant
-      ? "Tap anywhere on the field \u2014 or aim with arrows and press Space"
-      : "Tap your blue soil \u2014 or aim with arrows and press Space";
-    var pw = ctx.measureText(prompt).width + 26 * ui;
-    var ph = 26 * ui;
-    var px = W / 2 - pw / 2;
-    var py = top - ph - 8 * ui;
-    ctx.save();
-    ctx.fillStyle = "rgba(255,254,248,0.95)";
-    roundRectPath(ctx, px, py, pw, ph, ph / 2);
-    ctx.fill();
-    ctx.strokeStyle = C.blue;
-    ctx.lineWidth = 1.8;
-    ctx.stroke();
-    ctx.fillStyle = "#16234c";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(prompt, W / 2, py + ph / 2 + 1);
-    // red arrow pointing down at the deployment bar
-    ctx.fillStyle = C.red;
-    ctx.beginPath();
-    var ax = W / 2, ay = py + ph + 2 * ui;
-    ctx.moveTo(ax - 7 * ui, ay); ctx.lineTo(ax + 7 * ui, ay); ctx.lineTo(ax, ay + 10 * ui);
-    ctx.closePath(); ctx.fill();
-    ctx.restore();
+  // ---- standing order: one tap deploys. Drawn ABOVE the tray, over the bottom of
+  // the field, so the unit cards can never cover it.
+  var tip = "点卡片或按 1\u20135 立即出兵,Space 重复 \u00b7 Tap a card or press 1\u20135 \u00b7 Space repeats";
+  var tfs = Math.round(14 * ui);
+  ctx.font = "bold " + tfs + "px " + FONT;
+  while (tfs > 8 && ctx.measureText(tip).width > W - 56 * ui) {
+    tfs--;
+    ctx.font = "bold " + tfs + "px " + FONT;
   }
+  var tw2 = ctx.measureText(tip).width + 26 * ui;
+  var th2 = 26 * ui;
+  var tx2 = W / 2 - tw2 / 2;
+  var ty2 = top - th2 - 9 * ui;
+  ctx.save();
+  ctx.fillStyle = "rgba(255,254,248,0.95)";
+  roundRectPath(ctx, tx2, ty2, tw2, th2, th2 / 2);
+  ctx.fill();
+  ctx.strokeStyle = C.blue;
+  ctx.lineWidth = 1.8;
+  ctx.stroke();
+  ctx.fillStyle = "#16234c";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(tip, W / 2, ty2 + th2 / 2 + 1);
+  // red arrow pointing down at the deployment bar
+  ctx.fillStyle = C.red;
+  ctx.beginPath();
+  var ax = W / 2, ay = ty2 + th2 + 2 * ui;
+  ctx.moveTo(ax - 7 * ui, ay); ctx.lineTo(ax + 7 * ui, ay); ctx.lineTo(ax, ay + 10 * ui);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
 
   // ---- army counter, so the unit cap is never a mystery
   var allyN = countSide("blue"), foeN = countSide("red");
@@ -1958,7 +1906,6 @@ function drawCard(rect, index) {
   var ui = L.ui;
   var def = UNITS[rect.key];
   var afford = G.ink >= def.cost;
-  var selected = G.selected === rect.key;
   var hover = G.mouse.x >= rect.x && G.mouse.x <= rect.x + rect.w &&
               G.mouse.y >= rect.y && G.mouse.y <= rect.y + rect.h;
   var rng = mulberry32(700 + index * 37);
@@ -1966,7 +1913,7 @@ function drawCard(rect, index) {
   ctx.save();
   ctx.globalAlpha = afford ? 1 : 0.42;
 
-  if (selected) {
+  if (hover && afford) {
     ctx.shadowColor = "rgba(23,53,156,0.35)";
     ctx.shadowBlur = 12 * ui;
   }
@@ -1975,23 +1922,8 @@ function drawCard(rect, index) {
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  // yellow tape on the selected card
-  if (selected) {
-    ctx.save();
-    ctx.globalAlpha = 0.95;
-    ctx.fillStyle = C.tape;
-    var tw = rect.w * 0.52, th = 13 * ui;
-    ctx.translate(rect.x + rect.w / 2, rect.y + 2 * ui);
-    ctx.rotate(-0.05);
-    ctx.fillRect(-tw / 2, -th / 2, tw, th);
-    ctx.strokeStyle = C.tapeLine;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(-tw / 2, -th / 2, tw, th);
-    ctx.restore();
-  }
-
-  ctx.strokeStyle = selected ? "#0e2270" : (hover && afford ? "#3a5fc8" : "#1d2b55");
-  ctx.lineWidth = selected ? 3 : 2;
+  ctx.strokeStyle = (hover && afford) ? "#3a5fc8" : "#1d2b55";
+  ctx.lineWidth = (hover && afford) ? 2.8 : 2;
   sketchRoundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8 * ui, 700 + index * 91, 1.0);
 
   // sprite
@@ -2046,7 +1978,7 @@ function drawCard(rect, index) {
 
   pushButton({
     id: "card-" + rect.key, x: rect.x, y: rect.y, w: rect.w, h: rect.h,
-    cardKey: rect.key, action: function () { selectCard(rect.key); }
+    cardKey: rect.key, action: function () { deployCard(rect.key); }
   });
 }
 
@@ -2062,7 +1994,6 @@ function drawHint() {
   var hgt = 30 * L.ui;
   // just above the deployment tray, where the player is already looking
   var x = W / 2, y = H - L.barH - hgt - 42 * L.ui;
-  if (G.selected) y -= hgt + 6 * L.ui;
   ctx.fillStyle = "rgba(255,255,255,0.95)";
   roundRectPath(ctx, x - wdt / 2, y, wdt, hgt, 6 * L.ui);
   ctx.fill();
@@ -2451,13 +2382,9 @@ var HELP_ROWS = [
     ["G", "unit guide"]
   ]],
   ["Battle", [
-    ["1 \u2013 5", "pick a unit card"],
-    ["Q / E", "previous / next card"],
-    ["\u2190 \u2191 \u2193 \u2192", "move the aim cursor (WASD works too)"],
-    ["Shift + move", "move the cursor faster"],
-    ["Space", "deploy at the cursor \u2014 keeps the card selected"],
-    ["Esc", "cancel the selection"],
-    ["P", "pause / resume"],
+    ["1 \u2013 5", "deploy that unit immediately"],
+    ["Space", "deploy the same unit again"],
+    ["Esc  /  P", "pause / resume"],
     ["F", "switch 1x / 2x speed"]
   ]],
   ["Always", [
@@ -2477,7 +2404,7 @@ function drawHelpModal() {
   var hdrH = 34 * ui;
   var total = 0;
   for (var s = 0; s < HELP_ROWS.length; s++) total += hdrH + HELP_ROWS[s][1].length * rowH;
-  var ph = Math.min(H * 0.9, total + 84 * ui);
+  var ph = Math.min(H * 0.9, total + 118 * ui);   // room for two footnote lines
   var px = (W - pw) / 2, py = (H - ph) / 2;
 
   ctx.fillStyle = "rgba(255,254,248,0.98)";
@@ -2537,6 +2464,8 @@ function drawHelpModal() {
   ctx.textAlign = "center";
   ctx.font = "bold " + Math.round(12 * ui) + "px " + FONT;
   ctx.fillStyle = "#6b7699";
+  ctx.fillText("点一下卡片就出兵,落点自动选 \u00b7 one tap deploys \u2014 the lane picks itself",
+               px + pw / 2, py + ph - 32 * ui);
   ctx.fillText("press H or Esc to close", px + pw / 2, py + ph - 14 * ui);
   ctx.restore();
 

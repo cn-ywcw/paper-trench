@@ -21,16 +21,16 @@ These are requirements, not preferences. Breaking one breaks the deliverable.
 
 ## File map
 
-`paper-trench.html` (~2,600 lines) is organized by banner comments — jump by searching
+`paper-trench.html` (~2,770 lines) is organized by banner comments — jump by searching
 for the banner, not by line number:
 
 ```
-constants (31) · state (64) · helpers (105) · doodle drawing (129) · sizing (226)
-unit sprite (340) · data (433) · lifecycle (482) · spawning (525) · projectiles (668)
-combat (719) · fx (783) · update (799) · AI (1018) · input (1141)
-rendering (1292) → battlefield (1366) HUD (1659) bottom bar (1771) menu (2027)
-  hotkey help overlay (2376) game over (2478)
-loop (2549) · boot (2570)
+constants (31) · state (64) · helpers (107) · doodle drawing (143) · sizing (240)
+unit sprite (354) · data (447) · lifecycle (496) · spawning (541) · projectiles (684)
+combat (735) · fx (799) · update (815) · AI (1034) · input (1157)
+rendering (1364) → battlefield (1490) HUD (1783) bottom bar (1895) menu (2176)
+  hotkey help overlay (2552) game over (2658)
+loop (2729) · boot (2750)
 ```
 
 Repo root also holds `preview-menu.png`, `preview-gameplay.png`, `preview-guide.png`,
@@ -128,24 +128,44 @@ Do not rediscover these.
   It applies to whichever side is behind `frontX`.
 - **Both armies deploy from their own defence line**, `DEPLOY_LINE = 68` px behind the
   HQ. **Deploying is a single action**: the cards, `1`–`5` and `Space` all call
-  `deployCard(key)` and the unit is on its way — there is no second click on the
-  battlefield. `autoLane()` picks the lane, `autoBlotTarget()` picks the blot's target.
-  Keep the battlefield click-free apart from the "tap a card" hint; a click that silently
-  places a unit at the pointer is the bug this design replaced.
+  `deployCard(key)` and the unit is on its way — there is never a second click on the
+  battlefield. Keep the battlefield click-free; a click that silently places a unit at
+  the pointer is the bug this design replaced.
+- **Where the unit comes out is a setting, not a hard-coded rule.** `G.mode` is
+  `"manual"` (default) or `"auto"`; `targetLane()` / `targetBlot()` are the only two
+  functions that read it, and `deployCard()` calls nothing else. *Manual* reuses
+  `G.aim` — the **last** point the player aimed at, never the live pointer — because
+  choosing a card drags the pointer down to the tray and that must not move the lane.
+  `G.aim.kb` marks an aim that came from the arrow keys. *Auto* ignores `G.aim`
+  completely and falls through to `autoLane()` / `autoBlotTarget()`.
+- **Auto mode is the fallback, not an error state.** In manual mode with nothing aimed
+  at yet (`G.aim.set === false`, e.g. the very first deploy after `Enter`), `targetLane()`
+  returns `autoLane()`. The on-field chevron always shows the real answer, so this can
+  never surprise the player.
 - **`autoLane()` must stay deterministic and y-only.** It scores nine candidate lanes by
   "distance from the enemy's ink-weighted push" minus "crowding from our own units", and
   `spawnUnit(side, type, x, preferY)` honours an explicit lane exactly (only the AI, which
   passes none, lets `pickLane()` scatter). A lane that shifts between frames reads as a
   bug, and a half-honoured `preferY` blend reintroduces the "my click did nothing"
   complaint.
+- **Range is position.** `updateUnits()` advances a unit *only* while it has no target in
+  range, so a unit's range alone decides how far back it forms up. That is the whole
+  mechanism behind "the MG and the tank don't walk into the front rank" — do not add a
+  separate stand-off rule for it, and do not hand the ranged units a range above
+  `HQ_RANGE` (195) unless you mean them to shell the watchtower for free. Artillery (285)
+  is the deliberate exception.
 - **Balance invariant: `Q = hp * dps / cost²`** must be roughly equal across units, so
   two armies spending equal ink trade evenly. Q was the metric that exposed artillery
   being unplayable (Q 138) and the tank being unkillable (Q 909). Re-derive Q whenever
   you touch the `UNITS` table.
 - **The counter-triangle is intentional and test-locked.** Soldiers are the most
-  ink-efficient and beat tanks/artillery in numbers; MG shreds infantry; the tank closes
-  on the MG; artillery cracks armour and is the only unit out-ranging the HQ watchtower
-  (260 vs 195); Ink Splash answers clumped pushes.
+  ink-efficient and beat tanks/artillery in numbers (but must cross the tank's 96 to get
+  there); MG shreds infantry and out-ranges the tank 168 to 96; the tank closes on the MG;
+  artillery cracks armour and is the only unit out-ranging the HQ watchtower (285 vs 195);
+  Ink Splash answers clumped pushes. The duel matrix in the harness must keep producing
+  exactly these winners after any range change — the 2024 range bump (mg 122→168,
+  tank 44→96, artillery 260→285) left all 13 recorded outcomes unchanged and only narrowed
+  the margin of "4 soldiers beat a tank" from 3 survivors to 1.
 - **Ink is the only resource.** Cap 10, regen `PLAYER_REGEN`. A unit that cannot spawn
   (40-per-side cap) must not consume ink — spawn first, deduct only on success, and show
   a hint.
@@ -157,27 +177,38 @@ Current values, kept here because they are the ones the balance was verified aga
 | unit | cost | hp | dmg | rate | range | speed | Q |
 |---|---|---|---|---|---|---|---|
 | soldier | 1 | 62 | 11 | 0.58 | 34 | 30 | 1176 |
-| mg | 2 | 92 | 6 | 0.20 | 122 | 14 | 690 |
-| tank | 3 | 200 | 34 | 1.05 | 44 | 20 | 720 |
-| artillery | 4 | 74 | 100 | 2.6 | 260 | 10 | 178 |
+| mg | 2 | 92 | 6 | 0.20 | 168 | 14 | 690 |
+| tank | 3 | 200 | 34 | 1.05 | 96 | 20 | 720 |
+| artillery | 4 | 74 | 100 | 2.6 | 285 | 10 | 178 |
 | ink | 5 | — | 175 | instant | radius 122 | — | — |
 
 `DIFFS` — recruit `{think 2.4, regen 0.34, wave 9, stat 0.90, smart 0}`, sergeant
 `{1.5, 0.56, 6, 1.00, 0.55}`, general `{0.95, 0.80, 5, 1.06, 1}`.
-Match `DURATION = 180`, `HQ_HP = 3000`, `MAX_UNITS_PER_SIDE = 40`.
+Match `DURATION = 180`, `HQ_HP = 3000`, `MAX_UNITS_PER_SIDE = 40`,
+`PLAYER_REGEN = 0.82`.
+
+Stand-off distances fall straight out of the range column and are asserted in the
+harness: soldier 34, mg 168, tank 96, artillery 285 px from a target that cannot move.
 
 Difficulty ladder was verified over 5 seeded full matches per difficulty: recruit
 5/5 wins, sergeant 2/5, general 0/5, most decided on territory at 180 s. Re-run that
 ladder after any change to `UNITS`, `DIFFS`, or `PLAYER_REGEN` — difficulty drifts
 easily and one income retune already had to be walked back.
 
-The ladder is also the A/B rig for **placement** changes, because a harness with a fixed
+The ladder is also the A/B rig for **any** balance change, because a harness with a fixed
 `Math.random` stream is not comparable to an earlier run with a different one. Seed the
 sandbox only when comparing two arms inside one process; for absolute win rates leave
-`Math` alone and use ≥10 matches per difficulty. The one-tap-deploy change was measured
-that way (real randomness, 10 matches, same proxy, only the placement rule swapped):
-auto-lane 8/10 recruit, 2/10 sergeant, 0/10 general versus `pickLane` scattering at
-9/10, 1/10, 0/10 — indistinguishable, so auto-placement did not move the balance.
+`Math` alone and use ≥20 matches per difficulty. Worked examples:
+
+- **One-tap deployment** (same proxy, only the placement rule swapped): auto-lane 8/10
+  recruit, 2/10 sergeant, 0/10 general versus `pickLane` scattering at 9/10, 1/10, 0/10 —
+  indistinguishable, so auto-placement did not move the balance.
+- **The range bump.** Win counts alone were too noisy (3/30 → 1/30 at sergeant), but the
+  *mean blue territory at the end* was not: 27% → 20%. Longer ranges amplify whoever has
+  the better composition, which at sergeant is the AI. Raising `PLAYER_REGEN` 0.75 → 0.82
+  put it back at 29% / 2-30 wins, and recruit (already meant to be winnable) went 18/20 →
+  20/20. When a change moves a metric, prefer the same proxy re-measured over raw win
+  counts, which saturate at n≈30.
 
 ## Conventions
 
@@ -195,6 +226,10 @@ auto-lane 8/10 recruit, 2/10 sergeant, 0/10 general versus `pickLane` scattering
 - **Keyboard and mouse are both first-class.** Every action reachable by click must be
   reachable by keyboard, and both routes must funnel through `deployCard(key)` so they
   cannot drift apart. `G.lastKey` remembers the last card used; `Space` repeats it, which
-  is how a player holds a push together. There is no aim cursor any more — arrow and WASD
-  presses just raise `DEPLOY_HINT` so the old muscle memory gets an explanation instead of
-  silence.
+  is how a player holds a push together. Arrow/WASD aim the lane in manual mode
+  (`moveAim`), and in auto mode they raise `DEPLOY_HINT` so the old muscle memory gets an
+  explanation instead of silence.
+- **One-line captions shrink with `fitFont()`.** Canvas does not wrap or auto-shrink, and
+  a clipped hint is worse than a small one. Any single-line label that carries a variable
+  string (menu blurbs, the keyboard legend, the tray tip) goes through
+  `fitFont(text, maxW, startPx)`; `wrapText` is for genuinely multi-line prose.

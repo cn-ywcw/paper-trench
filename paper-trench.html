@@ -57,7 +57,7 @@ var HQ_REGEN = 14;           // hp/s once the HQ has been left alone for a momen
 var HQ_RANGE = 195;          // the HQ watchtower's reach
 var HQ_DPS   = 15;           // per shot
 var HQ_RATE  = 0.42;         // seconds between shots
-var PLAYER_REGEN = 0.75;     // ink per second
+var PLAYER_REGEN = 0.82;     // ink per second (nudged up when the ranged units gained reach)
 var MAX_UNITS_PER_SIDE = 40;
 var FRONT_SPEED = 22;        // how fast the trench line crawls, px/s at ui 1
 
@@ -83,6 +83,8 @@ var G = {
   fx: [],
   decor: [],
   lastKey: "soldier",    // Space repeats whatever you deployed last
+  mode: "manual",        // "manual" = you point at the lane, "auto" = the game picks it
+  aim: { x: 0, y: 0, set: false, kb: false },   // last point the player aimed at, in field px
   playerHQ: null,
   enemyHQ: null,
   aiTimer: 0,
@@ -105,6 +107,18 @@ function pushButton(b) { if (BTN_ON) buttons.push(b); }
 /* ------------------------------ helpers -------------------------------- */
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Canvas has no auto-shrink for one-line captions, and a clipped hint is worse than
+// a small one. Shrinks the current bold font until `text` fits `maxW`.
+function fitFont(text, maxW, startPx) {
+  var fs = Math.max(8, Math.round(startPx));
+  ctx.font = "bold " + fs + "px " + FONT;
+  while (fs > 8 && ctx.measureText(text).width > maxW) {
+    fs--;
+    ctx.font = "bold " + fs + "px " + FONT;
+  }
+  return fs;
+}
 function mulberry32(a) {
   return function () {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
@@ -452,18 +466,18 @@ var UNITS = {
   },
   mg: {
     key: "mg", name: "Machine Gun", cn: "机枪", cost: 2,
-    hp: 92, speed: 14, range: 122, dmg: 6, rate: 0.2,
-    desc: "Long range, high rate of fire. Mows down infantry before they can close."
+    hp: 92, speed: 14, range: 168, dmg: 6, rate: 0.2,
+    desc: "Long range, high rate of fire. Sets up behind the line and mows infantry down before they can close."
   },
   tank: {
     key: "tank", name: "Tank", cn: "坦克", cost: 3,
-    hp: 200, speed: 20, range: 44, dmg: 34, rate: 1.05,
-    desc: "Armoured spearhead. Survives shellfire and breaks the enemy HQ."
+    hp: 200, speed: 20, range: 96, dmg: 34, rate: 1.05,
+    desc: "Armoured spearhead. Shells the trench from behind its own infantry, survives shellfire and breaks the enemy HQ."
   },
   artillery: {
     key: "artillery", name: "Artillery", cn: "火炮", cost: 4,
-    hp: 74, speed: 10, range: 260, dmg: 100, rate: 2.6, splash: 8,
-    desc: "Siege gun. The only unit that out-ranges the HQ watchtower, so it can shell a base safely — but infantry that reaches it kills it."
+    hp: 74, speed: 10, range: 285, dmg: 100, rate: 2.6, splash: 8,
+    desc: "Siege gun. The only unit that out-ranges the HQ watchtower, so it fires from the back of the field — but infantry that reaches it kills it."
   },
   ink: {
     key: "ink", name: "Ink Splash", cn: "墨水泼溅", cost: 5,
@@ -492,6 +506,8 @@ function startGame(diff) {
   G.projs = [];
   G.fx = [];
   G.lastKey = "soldier";
+  G.aim.set = false;                     // the previous match's aim is not this match's
+  G.aim.kb = false;
   G.result = null;
   G.endReason = "";
   G.aiTimer = 2.0;
@@ -1161,9 +1177,37 @@ function setHint(msg) {
 }
 
 // Deploying costs exactly one action: pick a card and the unit is already on its
-// way. There is no second click on the battlefield — the lane, the marching order
-// and the blot's target are all chosen for the player.
+// way. There is never a second click on the battlefield. *Where* it comes out is a
+// setting: manual (you point, the game remembers the point) or auto (the game reads
+// the battle and picks).
 var DEPLOY_HINT = "按 1–5 或点卡片出兵 · Press 1–5 or tap a card to deploy";
+var AIM_HINT = "已瞄准此处,点卡片出兵 · Aimed — now tap a card";
+
+function overField(x, y) {
+  var f = L.field;
+  return x >= 0 && x <= W && y >= f.y - 6 * L.ui && y <= f.y + f.h + 6 * L.ui;
+}
+
+function toggleMode() {
+  G.mode = (G.mode === "manual") ? "auto" : "manual";
+  setHint(G.mode === "manual"
+    ? "出兵位置:手动(移动鼠标或用方向键瞄准)· Lane: manual"
+    : "出兵位置:自动(系统挑车道)· Lane: auto");
+}
+
+// The lane the next unit marches out on. Manual mode reuses the last point aimed
+// at — never the live pointer — because picking a card drags the pointer down to
+// the tray and that must not move the lane.
+function targetLane() {
+  var f = L.field, pad = 26 * L.ui;
+  if (G.mode === "manual" && G.aim.set) return clamp(G.aim.y, f.y + pad, f.y + f.h - pad);
+  return autoLane();
+}
+
+function targetBlot() {
+  if (G.mode === "manual" && G.aim.set) return { x: G.aim.x, y: G.aim.y };
+  return autoBlotTarget();
+}
 
 function deployCard(key) {
   if (G.screen !== "playing" || G.paused) return;
@@ -1172,7 +1216,7 @@ function deployCard(key) {
   if (G.ink < def.cost) { setHint("墨水不足 · Not enough ink"); return; }
 
   if (def.instant) {
-    var t = autoBlotTarget();
+    var t = targetBlot();
     G.ink -= def.cost;
     G.lastKey = key;
     spawnInkBlot("blue", t.x, t.y, def.dmg, def.radius * L.ui);
@@ -1184,7 +1228,7 @@ function deployCard(key) {
     return;
   }
   // Spawn first, pay only if a unit actually appeared.
-  var made = spawnUnit("blue", key, playerSpawnX(), autoLane());
+  var made = spawnUnit("blue", key, playerSpawnX(), targetLane());
   if (!made) {
     setHint("部队已满 " + MAX_UNITS_PER_SIDE + " · Unit limit reached");
     return;
@@ -1202,16 +1246,21 @@ cvs.addEventListener("pointerdown", function (e) {
   var b = hitButton(p.x, p.y);
   if (b) { b.action(); return; }
 
-  // The battlefield itself no longer takes orders. Say so rather than look broken.
-  var f = L.field;
-  if (G.screen === "playing" && !G.paused && p.y >= f.y && p.y <= f.y + f.h) {
-    setHint(DEPLOY_HINT);
+  if (G.screen === "playing" && !G.paused && overField(p.x, p.y)) {
+    // A click on the field still does not deploy anything — it aims, or it explains.
+    setHint(G.mode === "manual" ? AIM_HINT : DEPLOY_HINT);
   }
 });
 
 cvs.addEventListener("pointermove", function (e) {
   var p = canvasPos(e);
   G.mouse.x = p.x; G.mouse.y = p.y;
+  if (overField(p.x, p.y)) {
+    G.aim.x = p.x;
+    G.aim.y = clamp(p.y, L.field.y, L.field.y + L.field.h);
+    G.aim.set = true;
+    G.aim.kb = false;                    // the pointer takes over the aim
+  }
 });
 
 cvs.addEventListener("pointerleave", function () {
@@ -1222,8 +1271,29 @@ cvs.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 
 /* --------------------------- keyboard controls -------------------------
    1-5      deploy that unit now     Space  deploy the same one again
+   M        manual / auto lane       arrows / WASD  aim (manual mode)
    P / Esc  pause / resume           F      1x / 2x speed
    H or ?   this shortcut list       G unit guide   Enter play / again     */
+var MOVE_KEYS = {
+  ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
+  a: [-1, 0], d: [1, 0], w: [0, -1], s: [0, 1],
+  A: [-1, 0], D: [1, 0], W: [0, -1], S: [0, 1]
+};
+
+function moveAim(dx, dy, fast) {
+  var f = L.field;
+  if (!G.aim.set || !G.aim.kb) {
+    // first arrow press picks the cursor up where the pointer left it
+    G.aim.kb = true;
+    if (!G.aim.set) { G.aim.x = G.playerHQ.x + DEPLOY_LINE * L.ui; G.aim.y = f.y + f.h / 2; }
+    G.aim.set = true;
+    return;                              // don't also nudge on the activating press
+  }
+  var step = (fast ? 46 : 15) * L.ui;
+  G.aim.x = clamp(G.aim.x + dx * step, 6, W - 6);
+  G.aim.y = clamp(G.aim.y + dy * step, f.y + 10 * L.ui, f.y + f.h - 10 * L.ui);
+}
+
 function setHelp(open) {
   G.helpOpen = open;
   if (open) {
@@ -1253,6 +1323,7 @@ window.addEventListener("keydown", function (e) {
     else if (key === "3") G.diff = "general";
     else if (k === "Enter" || k === " ") { startGame(G.diff); e.preventDefault(); }
     else if (key === "g") G.guideOpen = !G.guideOpen;
+    else if (key === "m") toggleMode();
     else if (k === "Escape") G.guideOpen = false;
     else if (k === "ArrowLeft" || k === "ArrowRight") {
       var order = ["recruit", "sergeant", "general"];
@@ -1282,10 +1353,11 @@ window.addEventListener("keydown", function (e) {
     deployCard(G.lastKey);          // hold it down to keep the push coming
     return;
   }
-  if (k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown" ||
-      key === "w" || key === "a" || key === "s" || key === "d") {
+  if (key === "m") { toggleMode(); return; }
+  if (MOVE_KEYS[k]) {
     e.preventDefault();
-    setHint(DEPLOY_HINT);           // the aim cursor is gone: the keys deploy now
+    if (G.mode === "manual") moveAim(MOVE_KEYS[k][0], MOVE_KEYS[k][1], e.shiftKey);
+    else setHint(DEPLOY_HINT);      // in auto mode the arrows have nothing to aim
   }
 });
 
@@ -1304,12 +1376,13 @@ function render() {
   if (G.helpOpen) { BTN_ON = true; drawHelpModal(); }
 }
 
-// Deployment is automatic, so the battlefield's only job is to show *where* the
-// next tap will land: the defence line, and the lane autoLane() picked for it.
+// The battlefield's only job is to show *where* the next unit will land: the
+// defence line, and the lane the current setting picked for it.
 function drawDeployGuide() {
   var ui = L.ui, f = L.field;
   var lx = G.playerHQ.x + DEPLOY_LINE * ui;
-  var ly = autoLane();
+  var ly = targetLane();
+  var manual = (G.mode === "manual" && G.aim.set);
 
   ctx.save();
   ctx.beginPath(); ctx.rect(0, f.y, W, f.h); ctx.clip();
@@ -1324,8 +1397,40 @@ function drawDeployGuide() {
   ctx.stroke();
   ctx.setLineDash([]);
 
+  // manual mode: a ghost of what is coming, so the aim reads as exact
+  if (manual && G.lastKey !== "ink") {
+    var sp = unitSprite(G.lastKey, "blue");
+    var s = sp.size * 0.8;
+    ctx.globalAlpha = 0.3;
+    ctx.drawImage(sp.canvas, lx - s / 2, ly - s / 2, s, s);
+    ctx.globalAlpha = 1;
+  }
+
+  // manual mode: which trench column the blot would ink
+  if (manual && G.lastKey === "ink") {
+    var t = targetBlot();
+    var band = UNITS.ink.radius * ui;
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = "rgba(23,53,156,0.12)";
+    ctx.fillRect(t.x - band, f.y, band * 2, f.h);
+    ctx.strokeStyle = C.blue;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8 * ui, 6 * ui]);
+    ctx.beginPath();
+    ctx.moveTo(t.x - band, f.y + 4); ctx.lineTo(t.x - band, f.y + f.h - 4);
+    ctx.moveTo(t.x + band, f.y + 4); ctx.lineTo(t.x + band, f.y + f.h - 4);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = C.blueDeep;
+    ctx.beginPath();
+    ctx.moveTo(t.x - 15 * ui, t.y); ctx.lineTo(t.x + 15 * ui, t.y);
+    ctx.moveTo(t.x, t.y - 15 * ui); ctx.lineTo(t.x, t.y + 15 * ui);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
   // the lane the next unit will take — a chevron, so nobody reads it as a unit
-  ctx.globalAlpha = 0.45;
+  ctx.globalAlpha = manual ? 0.85 : 0.45;
   ctx.strokeStyle = "rgba(23,53,156,0.9)";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -1338,11 +1443,30 @@ function drawDeployGuide() {
   ctx.globalAlpha = 1;
 
   // label sits to the right of the line so the HQ wire never runs through it
+  var label = G.mode === "manual"
+    ? "防线 · deploy line · 手动 manual"
+    : "防线 · deploy line · 自动 auto";
   ctx.fillStyle = C.blue;
   ctx.font = "bold " + Math.round(11 * ui) + "px " + FONT;
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
-  ctx.fillText("防线 · deploy line", lx + 8 * ui, f.y + 14 * ui);
+  ctx.fillText(label, lx + 8 * ui, f.y + 14 * ui);
+
+  // keyboard reticle, manual mode only
+  if (manual && G.aim.kb) {
+    var r = Math.max(15 * ui, 14 * ui);
+    ctx.strokeStyle = "rgba(16,29,74,0.85)";
+    ctx.beginPath();
+    ctx.arc(lx, ly, r, 0, 6.2832);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(lx - r - 5 * ui, ly); ctx.lineTo(lx - r + 2 * ui, ly);
+    ctx.moveTo(lx + r - 2 * ui, ly); ctx.lineTo(lx + r + 5 * ui, ly);
+    ctx.moveTo(lx, ly - r - 5 * ui); ctx.lineTo(lx, ly - r + 2 * ui);
+    ctx.moveTo(lx, ly + r - 2 * ui); ctx.lineTo(lx, ly + r + 5 * ui);
+    ctx.stroke();
+  }
+
   ctx.restore();
   ctx.textAlign = "left";
 }
@@ -1852,7 +1976,7 @@ function drawBar() {
 
   // ---- standing order: one tap deploys. Drawn ABOVE the tray, over the bottom of
   // the field, so the unit cards can never cover it.
-  var tip = "点卡片或按 1\u20135 立即出兵,Space 重复 \u00b7 Tap a card or press 1\u20135 \u00b7 Space repeats";
+  var tip = "点卡片或按 1\u20135 出兵,Space 重复 \u00b7 Tap a card or press 1\u20135; Space repeats";
   var tfs = Math.round(14 * ui);
   ctx.font = "bold " + tfs + "px " + FONT;
   while (tfs > 8 && ctx.measureText(tip).width > W - 56 * ui) {
@@ -1898,6 +2022,31 @@ function drawBar() {
   // ---- unit cards
   var cards = cardRects();
   for (var c = 0; c < cards.length; c++) drawCard(cards[c], c);
+
+  // ---- deploy-lane mode pill, in the gutter left of the tray (always visible, and
+  // clickable, so the setting is never a mystery mid-match)
+  var pillW = Math.min(cards[0].x - 24 * ui, 108 * ui);
+  if (pillW > 48 * ui) {
+    var pillH = 28 * ui;
+    var pillX = 12 * ui, pillY = cards[0].y + 6 * ui;
+    var manual = G.mode === "manual";
+    ctx.save();
+    ctx.fillStyle = manual ? "#eef3fc" : "rgba(255,255,255,0.92)";
+    roundRectPath(ctx, pillX, pillY, pillW, pillH, pillH / 2);
+    ctx.fill();
+    ctx.strokeStyle = manual ? C.blue : "#8b93a8";
+    ctx.lineWidth = 1.6;
+    roundRectPath(ctx, pillX, pillY, pillW, pillH, pillH / 2);
+    ctx.stroke();
+    ctx.fillStyle = "#16234c";
+    ctx.font = "bold " + Math.round(11 * ui) + "px " + FONT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(manual ? "手动 Manual" : "自动 Auto", pillX + pillW / 2, pillY + pillH / 2 + 1);
+    ctx.restore();
+    pushButton({ id: "mode", x: pillX, y: pillY, w: pillW, h: pillH, action: toggleMode });
+  }
+
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
 }
@@ -2232,8 +2381,35 @@ function drawMenu() {
   }
   ctx.font = "bold " + Math.round(13 * ui) + "px " + FONT;
   ctx.fillStyle = "#4a5578";
+  fitFont(DIFFS[G.diff].cn + " · " + DIFFS[G.diff].blurb, bw - 6 * ui, 13 * ui);
   ctx.fillText(DIFFS[G.diff].cn + " · " + DIFFS[G.diff].blurb, bx, y + bhei + 17 * ui);
   y += bhei + 30 * ui;
+
+  // where do your troops come out?  Manual = you point, Auto = the game reads the fight
+  ctx.font = "bold " + Math.round(16 * ui) + "px " + FONT;
+  ctx.fillStyle = C.blue;
+  ctx.fillText("Deploy lane · 出兵位置", bx, y + 14 * ui);
+  y += 24 * ui;
+
+  var mwid = (bw - gap) / 2;
+  var mhei = Math.min(42 * ui, H * 0.068);
+  drawButton(bx, y, mwid, mhei, "Manual · 手动", {
+    active: G.mode === "manual",
+    fontSize: Math.round(Math.min(16 * ui, mwid / 9)),
+    action: function () { G.mode = "manual"; }
+  });
+  drawButton(bx + mwid + gap, y, mwid, mhei, "Auto · 自动", {
+    active: G.mode === "auto",
+    fontSize: Math.round(Math.min(16 * ui, mwid / 9)),
+    action: function () { G.mode = "auto"; }
+  });
+  var blurb = (G.mode === "manual")
+    ? "你指哪条车道,兵就从哪条出(鼠标或方向键,仍然只需点一下卡片)"
+    : "系统按战场局势自动挑车道,适合只想点卡片不想瞄准的时候";
+  ctx.fillStyle = "#4a5578";
+  fitFont(blurb, bw - 6 * ui, 12.5 * ui);
+  ctx.fillText(blurb, bx, y + mhei + 16 * ui);
+  y += mhei + 28 * ui;
 
   // play
   var ph = Math.min(74 * ui, H * 0.115);
@@ -2271,10 +2447,10 @@ function drawMenu() {
   ctx.save();
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.font = "bold " + Math.round(12.5 * ui) + "px " + FONT;
+  var kbLine = "Keyboard:  1 2 3 difficulty  ·  M deploy lane  ·  Enter play  ·  G guide  ·  H all shortcuts";
+  fitFont(kbLine, bw - 6 * ui, 12.5 * ui);
   ctx.fillStyle = "#6b7699";
-  ctx.fillText("Keyboard:  1 2 3 difficulty  ·  Enter play  ·  G guide  ·  H all shortcuts",
-               bx + 6 * ui, y + 6 * ui);
+  ctx.fillText(kbLine, bx + 6 * ui, y + 6 * ui);
   ctx.restore();
   ctx.textBaseline = "alphabetic";
 
@@ -2384,6 +2560,9 @@ var HELP_ROWS = [
   ["Battle", [
     ["1 \u2013 5", "deploy that unit immediately"],
     ["Space", "deploy the same unit again"],
+    ["M", "deploy lane: manual / auto"],
+    ["\u2190 \u2191 \u2193 \u2192", "aim the lane (manual mode; WASD works too)"],
+    ["Shift + move", "aim faster"],
     ["Esc  /  P", "pause / resume"],
     ["F", "switch 1x / 2x speed"]
   ]],
@@ -2462,10 +2641,11 @@ function drawHelpModal() {
   }
 
   ctx.textAlign = "center";
-  ctx.font = "bold " + Math.round(12 * ui) + "px " + FONT;
   ctx.fillStyle = "#6b7699";
-  ctx.fillText("点一下卡片就出兵,落点自动选 \u00b7 one tap deploys \u2014 the lane picks itself",
-               px + pw / 2, py + ph - 32 * ui);
+  var foot = "点一下卡片就出兵,落点由 手动/自动 设置决定 \u00b7 one tap deploys \u2014 the lane setting decides where";
+  fitFont(foot, pw - 40 * ui, 12 * ui);
+  ctx.fillText(foot, px + pw / 2, py + ph - 32 * ui);
+  ctx.font = "bold " + Math.round(12 * ui) + "px " + FONT;
   ctx.fillText("press H or Esc to close", px + pw / 2, py + ph - 14 * ui);
   ctx.restore();
 

@@ -31,7 +31,7 @@
 
 ### 墨水
 
-墨水是唯一的资源,上限 10 点，每秒回复 0.75 点。
+墨水是唯一的资源,上限 10 点，每秒回复 0.82 点。
 
 **落后的一方回墨更快**：当你的领土占比低于 45% 时，墨水恢复速度会获得加成，最低谷时约为 1.7 倍。这是防止滚雪球的设计——被推到家门口不会直接崩盘。
 
@@ -49,24 +49,37 @@
 
 ## 单位
 
-点一下底部的卡片，部队就已经上路了——**只需要点一下**，不需要再点战场。
+点一下底部的卡片，部队就已经上路了——**只需要点一下**，不需要再点战场。部队统一从自家**防线**出发，车道由下面的「出兵位置」设置决定。
 
-出兵位置全部自动决定：部队统一从自家**防线**出发，车道由系统选择（优先补向敌人推进最狠的位置，并自动避开已经扎堆的地方）；墨水泼溅也自动瞄准敌人最密集的一团。你只需要决定**什么时候、出什么兵**。
+### 出兵位置：手动 / 自动（可切换）
+
+菜单里选一次，对局中随时按 `M` 或点左下角的小胶囊也能切：
+
+| 设置 | 车道由谁决定 | 怎么用 |
+|---|---|---|
+| **手动 Manual** | 你 | 把鼠标移到想出兵的那条车道（方向键 / WASD 也行），屏幕上的虚线箭头和半透明预览就是落点，然后点卡片或按 `1`–`5` |
+| **自动 Auto** | 系统 | 你只管点卡片；系统按战场局势挑车道（补向敌人推进最狠的位置，并避开已经扎堆的地方） |
+
+两种模式都**不需要第二次点击**：点卡片就是出兵，手动模式只是把"鼠标停在哪"当作车道，所以指针移到下面的卡片上时，车道还是你刚才指的那条。
+
+墨水泼溅在手动模式下会精确落在你指的位置（会画出将被泼中的整条战壕纵列）；自动模式下则自动瞄准敌人最密集的一团。
 
 | 单位 | 墨水 | 生命 | 伤害 | 攻击间隔 | 射程 | 速度 | 定位 |
 |---|---|---|---|---|---|---|---|
-| 士兵 Soldier | 1 | 62 | 11 | 0.58s | 34 | 30 | 最省墨的线列步兵，靠数量平推 |
-| 机枪 Machine Gun | 2 | 92 | 6 | 0.20s | 122 | 14 | 射程长、射速快，压制成群步兵 |
-| 坦克 Tank | 3 | 200 | 34 | 1.05s | 44 | 20 | 重甲矛头，能扛炮弹、拆 HQ |
-| 火炮 Artillery | 4 | 74 | 100 | 2.6s | 260 | 10 | 唯一的攻城炮，射程超过 HQ 瞭望塔（260 > 195），可安全轰基地，但被近身就死 |
-| 墨水泼溅 Ink Splash | 5 | — | 175 | 瞬发 | 半径 122 | — | 自动瞄准最密集的一团，对整条战壕纵列造成伤害，即使敌人站在自己领土上也照打 |
+| 士兵 Soldier | 1 | 62 | 11 | 0.58s | 34 | 30 | 最省墨的线列步兵，必须贴上去打，靠数量平推 |
+| 机枪 Machine Gun | 2 | 92 | 6 | 0.20s | 168 | 14 | 在步兵线后面架枪，射速快、压制成群步兵 |
+| 坦克 Tank | 3 | 200 | 34 | 1.05s | 96 | 20 | 在自己的步兵身后开炮，重甲、能扛炮弹、拆 HQ |
+| 火炮 Artillery | 4 | 74 | 100 | 2.6s | 285 | 10 | 唯一的攻城炮，蹲在战场最后方，射程超过 HQ 瞭望塔（285 > 195），但被近身就死 |
+| 墨水泼溅 Ink Splash | 5 | — | 175 | 瞬发 | 半径 122 | — | 对整条战壕纵列造成伤害，即使敌人站在自己领土上也照打 |
+
+**射程 = 站位。** 单位只要有目标在射程内就会停下来开火，所以射程越长站得越靠后：士兵顶在最前面，机枪和坦克在步兵线后面，火炮蹲在最后。你不用手动拉扯阵型，它们自己会排成有纵深的梯队。
 
 单位之间存在刻意的**克制三角**，不是数值越大越强：
 
-- **士兵** 最省墨，靠数量能吃掉坦克和火炮
-- **机枪** 撕碎步兵人海
-- **坦克** 顶着火力贴近机枪
-- **火炮** 拆重甲、拆基地，但怕被近身
+- **士兵** 最省墨，靠数量能吃掉坦克和火炮，但要一路挨打才能贴上去
+- **机枪** 撕碎步兵人海，而且步兵得先跑完 168 的距离
+- **坦克** 在 96 的距离上砸机枪，但机枪的 168 让它先挨几轮
+- **火炮** 拆重甲、拆基地，是全队唯一能打到瞭望塔的，但怕被近身
 - **墨水泼溅** 是应对抱团推进的答案
 
 ## 难度
@@ -88,17 +101,21 @@ AI 会真的"看"你的部队组成：它会数你场上有多少坦克、多少
 | 菜单 | `1` `2` `3` | 选择难度 |
 | | `←` `→` | 循环切换难度 |
 | | `Enter` | 开始游戏 |
+| | `M` | 切换 手动 / 自动 出兵位置 |
 | | `G` | 打开单位图鉴 |
 | 对局 | `1` – `5` | 立即出兵（对应卡片序号） |
 | | `Space` | 重复上一次出兵，可以按住连点 |
+| | `M` | 切换 手动 / 自动 出兵位置 |
+| | `←↑↓→` / `WASD` | 瞄准车道（仅手动模式；自动模式下按了会提示） |
+| | `Shift` + 方向 | 瞄得更快 |
 | | `Esc` / `P` | 暂停 / 继续 |
 | | `F` | 1× / 2× 速度切换 |
 | 通用 | `H` 或 `?` | 快捷键面板（自动暂停对局） |
 | | `Esc` | 关闭面板 |
 
-战场上那条虚线就是**防线**，线上的箭头标出下一次出兵会走哪条车道，每次出兵都会在原地画一个圈作为反馈。
+战场上那条虚线就是**防线**，线上的箭头标出下一次出兵会走哪条车道，每次出兵都会在原地画一个圈作为反馈。手动模式下还会显示待部署单位的半透明预览；选中墨水泼溅时会显示将被泼中的整条战壕纵列。
 
-> 落点由系统自动选择：优先补向敌人推进最狠的车道，同时自动避开已经扎堆的位置。所以没有"第二次点击"，也不会因为手抖把兵丢在角落。
+> 两种模式都没有"第二次点击"：点卡片就是出兵。手动模式记的是**鼠标最后停在战场上的位置**，所以指针移到卡片上时车道不会跑掉，也不会因为手抖把兵丢在角落。
 
 ## 截图
 
@@ -143,13 +160,17 @@ doodle style. Blue ink is you, red ink is the enemy.
   `paper-trench.html` locally; no build step, no server, no network
 - A match lasts **3 minutes**. Win by holding **more than 50% of the territory** at time
   up, or by **destroying the red HQ** early
-- **Ink** is the only resource (cap 10). **One click on a card deploys** — there is no
-  second click on the battlefield; the lane and the blot's target are picked for you
+- **Ink** is the only resource (cap 10). **One click on a card deploys** — there is never
+  a second click on the battlefield. The deploy lane is a setting: **Manual** (point at
+  the lane with the mouse or the arrow keys) or **Auto** (the game reads the fight and
+  picks), switchable from the menu or with `M`
 - You take **50% less damage standing on your own territory** — true for both sides
 - The front line moves in real time, driven by the three deepest units of each army
+- **Range is position.** A unit stops the moment it has a target in range, so soldiers
+  hold the front while MGs, tanks and artillery form up behind them — no babysitting
 - **5 units** with an intentional counter-triangle (soldiers swarm, MGs shred infantry,
-  tanks close on MGs, artillery out-ranges everything including the HQ watchtower, Ink
-  Splash answers clumped pushes)
+  tanks shell MGs from 96 away, artillery out-ranges everything including the HQ
+  watchtower, Ink Splash answers clumped pushes)
 - **3 AI difficulties**; the AI reads your army composition and counter-picks
 - Full keyboard support: play an entire match without a mouse (`H` lists every shortcut)
 

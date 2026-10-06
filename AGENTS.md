@@ -25,12 +25,12 @@ These are requirements, not preferences. Breaking one breaks the deliverable.
 for the banner, not by line number:
 
 ```
-constants (31) · state (64) · helpers (107) · doodle drawing (143) · sizing (240)
-unit sprite (354) · data (447) · lifecycle (496) · spawning (541) · projectiles (684)
-combat (735) · fx (799) · update (815) · AI (1034) · input (1157)
-rendering (1364) → battlefield (1490) HUD (1783) bottom bar (1895) menu (2176)
-  hotkey help overlay (2552) game over (2658)
-loop (2729) · boot (2750)
+constants (31) · state (67) · helpers (114) · doodle drawing (150) · sizing (247)
+unit sprite (361) · data (454) · lifecycle (503) · spawning (550) · projectiles (697)
+combat (748) · fx (821) · update (837) · AI (1079) · input (1202)
+rendering (1409) → battlefield (1535) HUD (1828) bottom bar (1940) menu (2221)
+  hotkey help overlay (2597) game over (2703)
+loop (2774) · boot (2795)
 ```
 
 Repo root also holds `preview-menu.png`, `preview-gameplay.png`, `preview-guide.png`,
@@ -62,6 +62,11 @@ window.__PT = { G: G, L: L, update: update, render: render, resize: resize,
 Everything a test needs goes through `deployCard(key)` — the same single entry point the
 cards and the hotkeys use. There is no separate "click on the field" path to call any
 more, so a rule test cannot accidentally exercise a code path the player never touches.
+For front-line work also expose `inCover`, `damageUnit`, `playerSpawnX`, `enemySpawnX`,
+`autoLane`, `targetLane`, `targetBlot`, `toggleMode`, and the `buttons` array (as
+`down()`), plus setters for any constant you want to A/B (`setRank`, `setRegen`) —
+patching the exported `UNITS` table only works for values `spawnUnit` copies at spawn
+time, not for constants read inside `update()`.
 
 Stub the canvas and 2D context with a `Proxy` that returns a no-op function for any
 method and swallows any property set, so `render()` runs without a DOM. Three methods
@@ -98,10 +103,15 @@ Do not rediscover these.
   `innerWidth = width - 16` and `innerHeight = height - 95`, so the reference 1032×582
   layout needs `--window-size=1048,677`. Check `innerWidth+'x'+innerHeight` before
   trusting any screenshot's geometry.
-- **A measurement harness must let the front line move.** Pinning `frontX` to a fixed x
-  gives one side the 50% home-soil bonus and denies it to the other, which silently
-  doubles one army's effective HP and makes every duel favour the defender. Let
-  `updateFront()` run.
+- **A measurement harness must let the front line move.** `frontX` is now clamped into
+  the gap between the two leads, so pinning it by hand makes the clamp fight you — and
+  before the clamp existed, pinning it gave one side the home-soil bonus and denied it to
+  the other, which silently doubled one army's effective hp and made every duel favour the
+  defender. Let `updateFront()` run.
+- **Neuter the watchtowers before measuring a duel.** `playerHQ.range = enemyHQ.range = 0`
+  and HQ hp at 1e6. A duellist that wanders within 195 px of an HQ gets shot by it, which
+  killed the 34 px stand-off assertion (the soldier died at 47 px) until the ranges were
+  zeroed.
 - **`update()` decrements the 180 s clock.** A long sequence of duels in one harness
   process will trip `endGame` and then silently simulate nothing. Reset
   `G.screen = "playing"; G.time = 9999;` before each independent scenario.
@@ -124,8 +134,26 @@ Do not rediscover these.
   by `k = min(SPLASH_SQUASH, 0.85*radius/(L.field.h*0.5))` so a blast always inks the
   whole trench column at any window aspect ratio. A plain `Math.hypot` circle made
   artillery appear to always miss — do not "simplify" this back.
-- **50% damage reduction on your own soil** is a spec requirement, not a tuning knob.
-  It applies to whichever side is behind `frontX`.
+- **The front line is a hard boundary.** `updateFront()` eases `frontX` towards the
+  midpoint of the two front-rank averages, and then **clamps it into the gap between the
+  two leads** (`blues[0]` … `reds[0]`). Without that clamp the line trails at
+  `FRONT_SPEED` and units stand on the wrong side of it — measured at up to 94 px, in one
+  second out of seven. Note why this is a clamp and not a wall the units obey: the line is
+  *derived* from unit positions, so pinning units to it makes the midpoint equal the line
+  and the front freezes forever. Units must be free to lead; the line must be forbidden to
+  lag.
+- **Nothing may be spawned on the far side of the front.** `playerSpawnX()` /
+  `enemySpawnX()` take the floor/ceiling from `G.redLead` / `G.blueLead`, not from the
+  lagging `frontX`. Using the line alone let red reinforcements appear *behind* a blue
+  spearhead that had outrun it (4 seconds in 43 at the old settings) — the two armies
+  interleaved in x, which 1-D combat is not built for.
+- **Cover is a property of a line, not of whoever is deepest.** `inCover()` gives a unit
+  half damage unless it is in the deepest `1/FRONT_RANK` slice of its army, and a force
+  smaller than `FRONT_RANK` (8) is entirely dug in. The obvious "a lone unit is its own
+  front rank" version halves the effective hp of every lone tank and artillery piece and
+  **flips the locked counter-triangle** (4 soldiers stop beating a tank, 5 stop beating an
+  artillery) — the exposure is a rolling penalty, so whichever unit is leading at any
+  moment is the one paying for it. Test both arms of this with `--rank=`.
 - **Both armies deploy from their own defence line**, `DEPLOY_LINE = 68` px behind the
   HQ. **Deploying is a single action**: the cards, `1`–`5` and `Space` all call
   `deployCard(key)` and the unit is on its way — there is never a second click on the
@@ -185,7 +213,7 @@ Current values, kept here because they are the ones the balance was verified aga
 `DIFFS` — recruit `{think 2.4, regen 0.34, wave 9, stat 0.90, smart 0}`, sergeant
 `{1.5, 0.56, 6, 1.00, 0.55}`, general `{0.95, 0.80, 5, 1.06, 1}`.
 Match `DURATION = 180`, `HQ_HP = 3000`, `MAX_UNITS_PER_SIDE = 40`,
-`PLAYER_REGEN = 0.82`.
+`PLAYER_REGEN = 1.05`, `FRONT_RANK = 8`.
 
 Stand-off distances fall straight out of the range column and are asserted in the
 harness: soldier 34, mg 168, tank 96, artillery 285 px from a target that cannot move.
@@ -209,6 +237,13 @@ sandbox only when comparing two arms inside one process; for absolute win rates 
   put it back at 29% / 2-30 wins, and recruit (already meant to be winnable) went 18/20 →
   20/20. When a change moves a metric, prefer the same proxy re-measured over raw win
   counts, which saturate at n≈30.
+- **Exposing the front rank** (paired seeds, n=20, `--rank=1e9` vs `--rank=8`): recruit
+  18/20 @87% vs 12/20 @60%, sergeant 2/20 @25% vs 0/20 @23%, general 0/20 @17% vs 0/20
+  @20%. So a rule that makes the leading unit pay full price is worth about 6 wins and 27
+  points of territory — pay for it in `PLAYER_REGEN` (0.82 → 1.05 put recruit back at
+  17/20 @75%, sergeant 2/20 @31%, general 0/20 @21%). Any exposure share from 1/8 to 1/24
+  costs roughly the same, because the penalty *rolls*: kill the leader and the next unit
+  becomes the leader. There is no gentle setting of this knob.
 
 ## Conventions
 

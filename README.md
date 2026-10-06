@@ -31,7 +31,7 @@
 
 ### 墨水
 
-墨水是唯一的资源,上限 10 点，每秒回复 0.82 点。
+墨水是唯一的资源,上限 10 点，每秒回复 1.05 点。
 
 **落后的一方回墨更快**：当你的领土占比低于 45% 时，墨水恢复速度会获得加成，最低谷时约为 1.7 倍。这是防止滚雪球的设计——被推到家门口不会直接崩盘。
 
@@ -41,11 +41,19 @@
 
 战场被一条会实时移动的**前线**分成两块。补给线以内的土地就是你的领土。
 
-站在**自己领土上时受到的伤害减半**。这条规则对双方同时生效——所以你防守时更硬，但敌人缩回自己阵地时也一样难啃。
+**只有最前排会挨满伤害，后面的兄弟有掩体,受到的伤害减半。** 判定方式是看你离**自家最深入的部队**有多远:
+
+- 每 8 个兵里有 1 个在最前面开路,它吃满伤害;身后的人减半
+- 部队不足 8 人时没有"前排"可言,全员都在掩体里(所以单独一辆坦克或一门火炮不会被白打)
+- 这条规则对双方完全一样
+
+所以硬冲是要付学费的:顶在最前面的人先挨枪,后面跟上来的才有掩体。
 
 ### 前线
 
-前线不是固定的，它由双方**最深入的 3 个单位**的平均位置决定。哪边推得靠前，线就往对面爬。前线爬进对方外侧 24% 的"筑垒区"时速度会明显变慢，形成一个自然的攻坚阻力。
+前线由双方**最深入的 3 个单位**的平均位置决定,哪边推得靠前,线就往对面爬。前线爬进对方外侧 24% 的"筑垒区"时速度会明显变慢,形成一个自然的攻坚阻力。
+
+**但前线同时是一条硬边界:任何单位都不会站到线的另一边。** 线会跟着最前面的部队走——如果线落在你部队后面,那支部队就等于站在界外了,所以线永远不低于(也不高于)双方最深入的那个单位。实测整局下来越线距离是 0 像素。
 
 ## 单位
 
@@ -164,8 +172,12 @@ doodle style. Blue ink is you, red ink is the enemy.
   a second click on the battlefield. The deploy lane is a setting: **Manual** (point at
   the lane with the mouse or the arrow keys) or **Auto** (the game reads the fight and
   picks), switchable from the menu or with `M`
-- You take **50% less damage standing on your own territory** — true for both sides
-- The front line moves in real time, driven by the three deepest units of each army
+- You take **50% less damage behind your own front rank** — one unit in eight is in the
+  open and takes full damage, and a force under eight is entirely dug in (so a lone tank
+  is never punished for being alone). True for both sides
+- The front line moves in real time, driven by the three deepest units of each army — and
+  it is a **hard boundary**: the line always keeps up with the deepest unit on either
+  side, so no unit ever stands on the wrong side of it
 - **Range is position.** A unit stops the moment it has a target in range, so soldiers
   hold the front while MGs, tanks and artillery form up behind them — no babysitting
 - **5 units** with an intentional counter-triangle (soldiers swarm, MGs shred infantry,

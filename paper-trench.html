@@ -57,9 +57,12 @@ var HQ_REGEN = 14;           // hp/s once the HQ has been left alone for a momen
 var HQ_RANGE = 195;          // the HQ watchtower's reach
 var HQ_DPS   = 15;           // per shot
 var HQ_RATE  = 0.42;         // seconds between shots
-var PLAYER_REGEN = 0.82;     // ink per second (nudged up when the ranged units gained reach)
+var PLAYER_REGEN = 1.05;     // ink per second. Raised twice, each time to pay for a change
+                             // that measurably favoured the AI: longer ranged units, then
+                             // the exposed front rank. Re-run the ladder before touching it.
 var MAX_UNITS_PER_SIDE = 40;
 var FRONT_SPEED = 22;        // how fast the trench line crawls, px/s at ui 1
+var FRONT_RANK = 8;          // one unit in eight is in the open — see inCover()
 
 /* ------------------------------- state --------------------------------- */
 var W = 0, H = 0, DPR = 1;
@@ -78,6 +81,10 @@ var G = {
   ink: 10,
   aiInk: 8,
   frontX: 0,
+  blueLead: -1,          // deepest blue unit (its x); -1 while the army is empty
+  redLead: 1e9,          // deepest red unit; the line may never cross either lead
+  blueOpen: 1e9,         // blue forward of this x is in the open; 1e9 = nobody is
+  redOpen: -1,           // red behind this x is in the open;  -1  = nobody is
   units: [],
   projs: [],
   fx: [],
@@ -454,10 +461,10 @@ function unitSprite(key, side) {
    special advantage instead:
        Soldier    Q ~1180  the yardstick: most hp and dps per ink, but fragile
        Tank       Q ~ 760  pays for concentration and surviving artillery
-       Machine Gun Q ~ 670  pays for 125 range
-       Artillery  Q ~ 180  pays for 265 range + splash, dies to anything close
-   DPS is the real damage per second against one target, ignoring the 50% bonus
-   for standing on your own soil (which applies to both sides). */
+       Machine Gun Q ~ 670  pays for 168 range
+       Artillery  Q ~ 180  pays for 285 range + splash, dies to anything close
+   DPS is the real damage per second against one target, with the exposed front rank
+   taking full damage and the support ranks taking half (both sides alike). */
 var UNITS = {
   soldier: {
     key: "soldier", name: "Soldier", cn: "士兵", cost: 1,
@@ -482,7 +489,7 @@ var UNITS = {
   ink: {
     key: "ink", name: "Ink Splash", cn: "墨水泼溅", cost: 5,
     hp: 0, speed: 0, range: 0, dmg: 175, rate: 0, radius: 122, instant: true,
-    desc: "Instant. Auto-aimed at the enemy's biggest knot: 175 damage across a whole trench column — wipes out infantry, even on their own soil."
+    desc: "Instant. Auto-aimed at the enemy's biggest knot: 175 damage across a whole trench column — it wipes out infantry even in cover."
   }
 };
 var ORDER = ["soldier", "mg", "tank", "artillery", "ink"];
@@ -524,6 +531,8 @@ function startGame(diff) {
   G.enemyHQ  = { side: "red",  isHQ: true, x: W - m, y: f.y + f.h / 2, hp: HQ_HP, maxHp: HQ_HP, flash: 0,
                  range: HQ_RANGE * L.ui, turretT: 0.6, calm: 0 };
   G.frontX = W / 2;
+  G.blueLead = -1; G.redLead = 1e9;
+  G.blueOpen = 1e9; G.redOpen = -1;
 }
 
 function endGame(reason) {
@@ -610,14 +619,18 @@ function deployLineX(side) {
 }
 
 function playerSpawnX() {
-  // never left of the line, never past the trench
-  return clamp(Math.min(deployLineX("blue"), G.frontX - 24 * L.ui), 12, W - 14);
+  // never right of the line, and never right of the enemy's deepest scout
+  var x = Math.min(deployLineX("blue"), G.frontX - 24 * L.ui);
+  if (G.redLead <= W) x = Math.min(x, G.redLead - 34 * L.ui);
+  return clamp(x, 12, W - 14);
 }
 
 function enemySpawnX() {
   // enemy troops march out of their own defence line on the far right — they no
-  // longer materialise next to the front.
-  return clamp(Math.max(deployLineX("red"), G.frontX + 24 * L.ui), 12, W - 14);
+  // longer materialise next to the front, and never behind our spearhead.
+  var x = Math.max(deployLineX("red"), G.frontX + 24 * L.ui);
+  if (G.blueLead >= 0) x = Math.max(x, G.blueLead + 34 * L.ui);
+  return clamp(x, 12, W - 14);
 }
 
 // One tap = one unit on the field, so the lane has to be chosen for the player.
@@ -733,13 +746,22 @@ function spawnInkBlot(side, tx, ty, dmg, radius) {
 }
 
 /* -------------------------------- combat ------------------------------- */
-function onOwnSoil(u) {
-  return u.side === "blue" ? (u.x < G.frontX) : (u.x > G.frontX);
+// Half damage, unless you are in the open.
+//
+// Exposure is a property of a *line*, not of whichever unit happens to be deepest:
+// one unit in FRONT_RANK is in the open, and a force smaller than that is entirely
+// dug in. Making a lone unit its own front rank would strip the tank and the
+// artillery of half their effective hp — a lone heavy unit would always be exposed —
+// and that flips the locked counter-triangle (4 soldiers stop beating a tank).
+// Do not "simplify" this back to a distance from the deepest unit.
+function inCover(u) {
+  if (u.side === "blue") return u.x < G.blueOpen;
+  return u.x > G.redOpen;
 }
 
 function damageUnit(u, dmg) {
   if (u.hp <= 0) return;
-  if (onOwnSoil(u)) dmg *= 0.5;          // 50% damage reduction on your own territory
+  if (inCover(u)) dmg *= 0.5;            // 50% damage reduction for the support ranks
   u.hp -= dmg;
   u.flash = 0.16;
   if (u.hp <= 0) killUnit(u);
@@ -1022,6 +1044,29 @@ function updateFront(dt) {
   var spd = FRONT_SPEED * L.ui * resist;
   G.frontX += clamp(target - G.frontX, -spd * dt, spd * dt);
   G.frontX = clamp(G.frontX, margin * 0.5, W - margin * 0.5);
+
+  // The line is a boundary, not just a trailing average. It may never sit behind the
+  // deepest unit of either army, or that unit would be standing on the wrong side of
+  // the line it is supposed to be holding. Note the target above is still the midpoint
+  // of the two *averages* — that is the intent; this clamp is the guarantee.
+  G.blueLead = blues.length ? blues[0] : -1;
+  G.redLead = reds.length ? reds[0] : 1e9;
+
+  // Who is standing in the open: the deepest slice of each army, one unit in
+  // FRONT_RANK. A force smaller than FRONT_RANK has no front rank to expose, so it is
+  // all in cover — that is what keeps lone tanks and artillery viable.
+  var k = Math.floor(blues.length / FRONT_RANK);
+  G.blueOpen = k > 0 ? blues[k - 1] : 1e9;
+  k = Math.floor(reds.length / FRONT_RANK);
+  G.redOpen = k > 0 ? reds[k - 1] : -1;
+
+  if (blues.length && reds.length && G.blueLead <= G.redLead) {
+    G.frontX = clamp(G.frontX, G.blueLead, G.redLead);
+  } else {
+    // no army on one side, or the two are somehow interleaved: hold our own lead.
+    if (blues.length) G.frontX = Math.max(G.frontX, G.blueLead);
+    if (reds.length) G.frontX = Math.min(G.frontX, G.redLead);
+  }
 }
 
 function updateFX(dt) {
@@ -1657,8 +1702,8 @@ function drawUnit(u) {
   var x = u.x - s / 2;
   var y = u.y - s / 2 + bob;
 
-  // shield hint: standing on your own soil = 50% less damage
-  if (onOwnSoil(u)) {
+  // shield hint: the support ranks take half damage, the open front rank does not
+  if (inCover(u)) {
     ctx.save();
     ctx.globalAlpha = 0.32;
     ctx.strokeStyle = u.side === "blue" ? C.blue : C.red;

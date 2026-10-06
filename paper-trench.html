@@ -1,0 +1,2665 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Paper Trench · 纸面战壕</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #e8ecf1;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #game {
+    display: block; width: 100%; height: 100%;
+    touch-action: none; cursor: crosshair;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function () {
+"use strict";
+
+/* =========================================================================
+   Paper Trench · 纸面战壕
+   Single-file HTML5 + Canvas casual strategy game.
+   Blue ink = you.  Red ink = the enemy.  Push the front, hold the line.
+   ========================================================================= */
+
+/* ----------------------------- constants ------------------------------- */
+var cvs = document.getElementById("game");
+var ctx = cvs.getContext("2d");
+
+var FONT = '"Comic Sans MS","Segoe Print","Bradley Hand","Chalkboard SE","Comic Neue",cursive';
+
+var C = {
+  paper:      "#fdfcf5",
+  gridMinor:  "rgba(122,160,212,0.30)",
+  gridMajor:  "rgba(88,132,196,0.44)",
+  blue:       "#17359c",
+  blueDeep:   "#0e2270",
+  blueMid:    "#3a5fc8",
+  red:        "#c0272d",
+  redDeep:    "#8b1a1f",
+  redMid:     "#d9454a",
+  ink:        "#16234c",
+  tape:       "rgba(247,224,140,0.88)",
+  tapeLine:   "rgba(203,172,80,0.85)",
+  cardBg:     "#fffef8",
+  grey:       "#9aa3b2"
+};
+
+var DURATION = 180;          // seconds per match
+var HQ_HP    = 3000;
+var HQ_REGEN = 14;           // hp/s once the HQ has been left alone for a moment
+var HQ_RANGE = 195;          // the HQ watchtower's reach
+var HQ_DPS   = 15;           // per shot
+var HQ_RATE  = 0.42;         // seconds between shots
+var PLAYER_REGEN = 0.75;     // ink per second
+var MAX_UNITS_PER_SIDE = 40;
+var FRONT_SPEED = 22;        // how fast the trench line crawls, px/s at ui 1
+
+/* ------------------------------- state --------------------------------- */
+var W = 0, H = 0, DPR = 1;
+var paperCv = null, bluePat = null, redPat = null;
+var spriteCache = {};
+
+var L = { ui: 1, hudH: 72, barH: 132, field: { x: 0, y: 0, w: 0, h: 0 } };
+
+var G = {
+  screen: "menu",        // menu | playing | over
+  paused: false,
+  speed: 1,
+  diff: "recruit",
+  guideOpen: false,
+  time: DURATION,
+  ink: 10,
+  aiInk: 8,
+  frontX: 0,
+  units: [],
+  projs: [],
+  fx: [],
+  decor: [],
+  selected: null,
+  playerHQ: null,
+  enemyHQ: null,
+  aiTimer: 0,
+  t: 0,
+  mouse: { x: -9999, y: -9999 },
+  kb: { active: false, x: 0, y: 0 },   // keyboard aim cursor
+  helpOpen: false,
+  helpPaused: false,
+  hint: "",
+  hintT: 0,
+  result: null,
+  endReason: ""
+};
+
+var buttons = [];
+var BTN_ON = true;
+var uid = 1;
+
+function pushButton(b) { if (BTN_ON) buttons.push(b); }
+
+/* ------------------------------ helpers -------------------------------- */
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hashStr(s) {
+  var h = 2166136261;
+  for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function shuffleWeighted(list) {
+  var total = 0, i;
+  for (i = 0; i < list.length; i++) total += list[i][1];
+  var r = Math.random() * total;
+  for (i = 0; i < list.length; i++) { r -= list[i][1]; if (r <= 0) return list[i][0]; }
+  return list[list.length - 1][0];
+}
+
+/* --------------------------- doodle drawing ---------------------------- */
+function sketchLine(c, x1, y1, x2, y2, rng, amp) {
+  amp = amp === undefined ? 1.2 : amp;
+  var mx = (x1 + x2) / 2 + (rng() * 2 - 1) * amp * 1.7;
+  var my = (y1 + y2) / 2 + (rng() * 2 - 1) * amp * 1.7;
+  c.beginPath();
+  c.moveTo(x1 + (rng() * 2 - 1) * amp, y1 + (rng() * 2 - 1) * amp);
+  c.quadraticCurveTo(mx, my, x2 + (rng() * 2 - 1) * amp, y2 + (rng() * 2 - 1) * amp);
+  c.stroke();
+}
+function sketchRect(c, x, y, w, h, seed, amp, passes) {
+  amp = amp === undefined ? 1.3 : amp;
+  passes = passes === undefined ? 2 : passes;
+  var rng = mulberry32(seed);
+  for (var p = 0; p < passes; p++) {
+    sketchLine(c, x, y, x + w, y, rng, amp);
+    sketchLine(c, x + w, y, x + w, y + h, rng, amp);
+    sketchLine(c, x + w, y + h, x, y + h, rng, amp);
+    sketchLine(c, x, y + h, x, y, rng, amp);
+  }
+}
+function sketchRoundRect(c, x, y, w, h, r, seed, amp) {
+  var rng = mulberry32(seed);
+  amp = amp === undefined ? 1.1 : amp;
+  for (var p = 0; p < 2; p++) {
+    c.beginPath();
+    c.moveTo(x + r, y + (rng() * 2 - 1) * amp);
+    c.lineTo(x + w - r, y + (rng() * 2 - 1) * amp);
+    c.quadraticCurveTo(x + w, y, x + w, y + r);
+    c.lineTo(x + w, y + h - r);
+    c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    c.lineTo(x + r, y + h);
+    c.quadraticCurveTo(x, y + h, x, y + h - r);
+    c.lineTo(x, y + r);
+    c.quadraticCurveTo(x, y, x + r, y);
+    c.stroke();
+  }
+}
+function sketchCircle(c, cx, cy, rad, seed, amp) {
+  var rng = mulberry32(seed);
+  amp = amp === undefined ? 1.1 : amp;
+  var steps = 11;
+  for (var p = 0; p < 2; p++) {
+    c.beginPath();
+    for (var i = 0; i <= steps; i++) {
+      var a = (i / steps) * Math.PI * 2;
+      var rr = rad + (rng() * 2 - 1) * amp;
+      var x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    }
+    c.closePath(); c.stroke();
+  }
+}
+function roundRectPath(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+function crossMark(c, x, y, s, rng) {
+  c.beginPath();
+  c.moveTo(x - s, y - s); c.lineTo(x + s, y + s);
+  c.moveTo(x + s, y - s); c.lineTo(x - s, y + s);
+  c.stroke();
+  if (rng) {
+    c.beginPath();
+    c.moveTo(x - s * 0.7, y); c.lineTo(x + s * 0.7, y);
+    c.stroke();
+  }
+}
+function starBurst(c, x, y, s, rng, n) {
+  n = n || 8;
+  c.beginPath();
+  for (var i = 0; i < n; i++) {
+    var a = (i / n) * Math.PI * 2 + 0.3;
+    var rr = s * (0.55 + rng() * 0.6);
+    var px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+    if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+  }
+  c.closePath(); c.stroke();
+}
+function wrapText(c, text, x, y, maxW, lh) {
+  var words = text.split(" ");
+  var line = "", yy = y;
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + " " + words[i] : words[i];
+    if (c.measureText(test).width > maxW && line) {
+      c.fillText(line, x, yy); line = words[i]; yy += lh;
+    } else line = test;
+  }
+  if (line) c.fillText(line, x, yy);
+  return yy;
+}
+
+/* ------------------------------ sizing --------------------------------- */
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  // measure the element itself: it is stretched to the viewport by CSS.
+  // Keep the floor low, otherwise a narrow phone window gets squashed drawing.
+  W = Math.max(320, Math.floor(cvs.clientWidth || window.innerWidth));
+  H = Math.max(300, Math.floor(cvs.clientHeight || window.innerHeight));
+  cvs.width = Math.floor(W * DPR);
+  cvs.height = Math.floor(H * DPR);
+  spriteCache = {};
+  buildPaper();
+  buildPatterns();
+  layout();
+}
+
+function layout() {
+  var ui = clamp(Math.min(W / 1032, H / 582), 0.62, 1.55);
+  L.ui = ui;
+  L.hudH = Math.min(Math.round(74 * ui), Math.round(H * 0.17));
+  L.barH = Math.min(Math.round(134 * ui), Math.round(H * 0.33));
+  L.field = { x: 0, y: L.hudH, w: W, h: H - L.hudH - L.barH };
+  buildDecor();
+}
+
+function buildPaper() {
+  paperCv = document.createElement("canvas");
+  paperCv.width = Math.floor(W * DPR);
+  paperCv.height = Math.floor(H * DPR);
+  var g = paperCv.getContext("2d");
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.fillStyle = C.paper;
+  g.fillRect(0, 0, W, H);
+
+  // soft paper blotches so the sheet is not perfectly flat
+  var r = mulberry32(7);
+  for (var i = 0; i < 80; i++) {
+    var x = r() * W, y = r() * H, rad = 24 + r() * 90;
+    var grd = g.createRadialGradient(x, y, 0, x, y, rad);
+    grd.addColorStop(0, "rgba(186,203,226,0.055)");
+    grd.addColorStop(1, "rgba(186,203,226,0)");
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, rad, 0, 6.2832); g.fill();
+  }
+
+  // the notebook grid
+  var step = 26;
+  g.lineWidth = 1;
+  for (var gx = 0; gx <= W; gx += step) {
+    var major = (Math.round(gx / step) % 5 === 0);
+    g.strokeStyle = major ? C.gridMajor : C.gridMinor;
+    g.beginPath(); g.moveTo(gx + 0.5, 0); g.lineTo(gx + 0.5, H); g.stroke();
+  }
+  for (var gy = 0; gy <= H; gy += step) {
+    var major2 = (Math.round(gy / step) % 5 === 0);
+    g.strokeStyle = major2 ? C.gridMajor : C.gridMinor;
+    g.beginPath(); g.moveTo(0, gy + 0.5); g.lineTo(W, gy + 0.5); g.stroke();
+  }
+
+  // faint ballpoint scribbles in the margins
+  g.strokeStyle = "rgba(90,130,195,0.10)";
+  g.lineWidth = 1.2;
+  var r2 = mulberry32(41);
+  for (var k = 0; k < 10; k++) {
+    var sx = r2() * W, sy = r2() * H;
+    g.beginPath();
+    g.moveTo(sx, sy);
+    for (var s = 0; s < 5; s++) {
+      sx += (r2() * 2 - 1) * 90; sy += (r2() * 2 - 1) * 40;
+      g.lineTo(sx, sy);
+    }
+    g.stroke();
+  }
+}
+
+function makeHatchPattern(color, size, dir, alpha) {
+  var c = document.createElement("canvas");
+  c.width = size; c.height = size;
+  var g = c.getContext("2d");
+  g.strokeStyle = color;
+  g.globalAlpha = alpha === undefined ? 1 : alpha;
+  g.lineWidth = 1.15;
+  g.lineCap = "round";
+  var lines = [[0, size, size, 0], [0, size * 0.5, size * 0.5, 0]];
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    g.beginPath();
+    if (dir > 0) { g.moveTo(l[0], l[1]); g.lineTo(l[2], l[3]); }
+    else { g.moveTo(l[0], size - l[1]); g.lineTo(l[2], size - l[3]); }
+    g.stroke();
+  }
+  return ctx.createPattern(c, "repeat");
+}
+
+function buildPatterns() {
+  bluePat = makeHatchPattern(C.blue, 14, 1, 0.8);
+  redPat = makeHatchPattern(C.red, 14, -1, 0.8);
+}
+
+function buildDecor() {
+  G.decor = [];
+  var f = L.field;
+  var r = mulberry32(1337);
+  for (var i = 0; i < 26; i++) {
+    G.decor.push({
+      x: 60 + r() * Math.max(40, W - 120),
+      y: f.y + 24 + r() * Math.max(40, f.h - 48),
+      s: 4 + r() * 7,
+      t: r() < 0.55 ? "cross" : (r() < 0.6 ? "star" : "blob"),
+      rot: (r() * 2 - 1) * 0.8,
+      seed: (r() * 1e9) | 0
+    });
+  }
+}
+
+/* ---------------------------- unit sprite ------------------------------ */
+var DRAW = {
+  soldier: function (g, seed, col) {
+    var r = mulberry32(seed);
+    g.strokeStyle = col; g.fillStyle = col;
+    g.lineWidth = 2.1; g.lineCap = "round"; g.lineJoin = "round";
+    g.beginPath(); g.arc(1, -11, 6.6, Math.PI * 1.02, Math.PI * 1.98); g.stroke(); // helmet
+    sketchCircle(g, 1, -9, 4.3, seed + 11, 0.55);                                   // head
+    sketchLine(g, 1, -5.5, 1, 5, r, 0.5);                                           // torso
+    sketchLine(g, 1, 5, -4.5, 13.5, r, 0.5);                                        // back leg
+    sketchLine(g, 1, 5, 6, 13.5, r, 0.5);                                           // front leg
+    sketchLine(g, 1, -3, 7.5, 0.5, r, 0.5);                                         // arm
+    sketchLine(g, 2, -4, 9, -14, r, 0.5);                                           // rifle
+    sketchLine(g, 7.5, -16.5, 10.5, -13, r, 0.5);                                   // muzzle
+  },
+  mg: function (g, seed, col) {
+    var r = mulberry32(seed);
+    g.strokeStyle = col; g.fillStyle = col;
+    g.lineWidth = 2.1; g.lineCap = "round"; g.lineJoin = "round";
+    sketchLine(g, -1, 2, -8.5, 14, r, 0.5);
+    sketchLine(g, 1, 2, 8.5, 14, r, 0.5);
+    sketchLine(g, 0, 2, 0, 14, r, 0.5);
+    sketchRoundRect(g, -10, -5, 18, 9, 3, seed + 3, 0.6);
+    sketchLine(g, 8, -1, 20, -2, r, 0.5);
+    sketchLine(g, 8, -3.5, 20, -4.5, r, 0.5);
+    sketchLine(g, -11, -9, -11, 4, r, 0.6);      // shield
+    sketchLine(g, -9, -9, -9, 4, r, 0.5);
+    sketchCircle(g, 2, -8, 3.2, seed + 9, 0.5);  // drum mag
+  },
+  tank: function (g, seed, col) {
+    var r = mulberry32(seed);
+    g.strokeStyle = col; g.fillStyle = col;
+    g.lineWidth = 2.1; g.lineCap = "round"; g.lineJoin = "round";
+    sketchRoundRect(g, -14, -5, 28, 13, 4, seed + 4, 0.7);
+    sketchRoundRect(g, -6, -13, 13, 8, 3, seed + 5, 0.6);
+    sketchLine(g, 6, -9, 21, -10, r, 0.5);
+    sketchLine(g, 6, -12, 21, -13, r, 0.5);
+    sketchLine(g, 21, -13.5, 21, -8.5, r, 0.4);
+    for (var i = 0; i < 4; i++) sketchCircle(g, -9 + i * 6, 8, 3.0, seed + 20 + i, 0.5);
+    sketchLine(g, -12, 0, 12, 0, r, 0.5);
+  },
+  artillery: function (g, seed, col) {
+    var r = mulberry32(seed);
+    g.strokeStyle = col; g.fillStyle = col;
+    g.lineWidth = 2.1; g.lineCap = "round"; g.lineJoin = "round";
+    sketchCircle(g, -6, 7, 6.5, seed + 6, 0.7);
+    sketchCircle(g, -6, 7, 1.6, seed + 7, 0.4);
+    sketchLine(g, -13, 9, 11, 9, r, 0.5);
+    sketchLine(g, 8, 9, 15, 5, r, 0.5);
+    sketchLine(g, -3, 3, 17, -11, r, 0.5);      // barrel (up-right)
+    sketchLine(g, -1, 6, 19, -8, r, 0.5);
+    sketchLine(g, 15, -14, 20, -11, r, 0.4);
+    sketchLine(g, 2, 3, 4, 8, r, 0.4);
+  },
+  ink: function (g, seed, col) {
+    var r = mulberry32(seed);
+    g.strokeStyle = col; g.fillStyle = col;
+    g.lineWidth = 2.1; g.lineCap = "round"; g.lineJoin = "round";
+    g.beginPath();
+    var pts = 12;
+    for (var i = 0; i <= pts; i++) {
+      var a = (i / pts) * Math.PI * 2;
+      var rr = (i % 2 === 0 ? 11 : 7.5) + (r() * 2 - 1) * 1.6;
+      var x = Math.cos(a) * rr, y = Math.sin(a) * rr + 1;
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.closePath(); g.stroke();
+    g.globalAlpha = 0.5;
+    g.beginPath(); g.arc(0, 1, 5.5, 0, 6.2832); g.fill();
+    g.globalAlpha = 1;
+    sketchLine(g, 0, 9, -1, 15, r, 0.6);
+    sketchLine(g, 5, 8, 7, 14, r, 0.6);
+  }
+};
+
+function unitSprite(key, side) {
+  var id = key + "|" + side;
+  if (spriteCache[id]) return spriteCache[id];
+  var S = 76;
+  var c = document.createElement("canvas");
+  c.width = Math.round(S * DPR);
+  c.height = Math.round(S * DPR);
+  var g = c.getContext("2d");
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.translate(S / 2, S / 2 + 2);
+  if (side === "red") g.scale(-1, 1);
+  var col = side === "blue" ? C.blue : C.red;
+  DRAW[key](g, hashStr(id), col);
+  var obj = { canvas: c, size: S };
+  spriteCache[id] = obj;
+  return obj;
+}
+
+/* ------------------------------- data ---------------------------------- */
+/* Unit balance
+   ------------
+   Two armies spending the same ink should trade roughly evenly, so no unit is
+   ever "strictly better". For a straight fight the quantity that has to match is
+       Q = hp * dps / cost^2      (derived from: army HP x army DPS / time)
+   Q is held near 1100 for line troops and bought down for units that get a
+   special advantage instead:
+       Soldier    Q ~1180  the yardstick: most hp and dps per ink, but fragile
+       Tank       Q ~ 760  pays for concentration and surviving artillery
+       Machine Gun Q ~ 670  pays for 125 range
+       Artillery  Q ~ 180  pays for 265 range + splash, dies to anything close
+   DPS is the real damage per second against one target, ignoring the 50% bonus
+   for standing on your own soil (which applies to both sides). */
+var UNITS = {
+  soldier: {
+    key: "soldier", name: "Soldier", cn: "士兵", cost: 1,
+    hp: 62, speed: 30, range: 34, dmg: 11, rate: 0.58,
+    desc: "Cheap line infantry. Best hp and dps per ink — flood the trench with them."
+  },
+  mg: {
+    key: "mg", name: "Machine Gun", cn: "机枪", cost: 2,
+    hp: 92, speed: 14, range: 122, dmg: 6, rate: 0.2,
+    desc: "Long range, high rate of fire. Mows down infantry before they can close."
+  },
+  tank: {
+    key: "tank", name: "Tank", cn: "坦克", cost: 3,
+    hp: 200, speed: 20, range: 44, dmg: 34, rate: 1.05,
+    desc: "Armoured spearhead. Survives shellfire and breaks the enemy HQ."
+  },
+  artillery: {
+    key: "artillery", name: "Artillery", cn: "火炮", cost: 4,
+    hp: 74, speed: 10, range: 260, dmg: 100, rate: 2.6, splash: 8,
+    desc: "Siege gun. The only unit that out-ranges the HQ watchtower, so it can shell a base safely — but infantry that reaches it kills it."
+  },
+  ink: {
+    key: "ink", name: "Ink Splash", cn: "墨水泼溅", cost: 5,
+    hp: 0, speed: 0, range: 0, dmg: 175, rate: 0, radius: 122, instant: true,
+    desc: "Instant. Tap anywhere on the field: 175 damage across a whole trench column — wipes out infantry, even on their own soil."
+  }
+};
+var ORDER = ["soldier", "mg", "tank", "artillery", "ink"];
+
+var DIFFS = {
+  recruit:  { name: "Recruit",  cn: "新兵", think: 2.4,  regen: 0.34, wave: 9, stat: 0.90, smart: 0,    blurb: "Slow waves, random picks." },
+  sergeant: { name: "Sergeant", cn: "中士", think: 1.5,  regen: 0.56, wave: 6, stat: 1.00, smart: 0.55, blurb: "Steady pressure, reads your army." },
+  general:  { name: "General",  cn: "将军", think: 0.95, regen: 0.80, wave: 5, stat: 1.06, smart: 1,    blurb: "Fast, counter-picks and fires for effect." }
+};
+
+/* ------------------------------ lifecycle ------------------------------ */
+function startGame(diff) {
+  G.diff = diff || G.diff;
+  G.screen = "playing";
+  G.paused = false;
+  G.speed = 1;
+  G.time = DURATION;
+  G.ink = 10;
+  G.aiInk = 8;
+  G.units = [];
+  G.projs = [];
+  G.fx = [];
+  G.selected = null;
+  G.result = null;
+  G.endReason = "";
+  G.aiTimer = 2.0;
+  G.t = 0;
+  G.hint = "";
+  G.hintT = 0;
+  G.helpOpen = false;
+  G.kb.active = false;
+  uid = 1;
+
+  var f = L.field;
+  var m = Math.round(38 * L.ui);
+  G.playerHQ = { side: "blue", isHQ: true, x: m, y: f.y + f.h / 2, hp: HQ_HP, maxHp: HQ_HP, flash: 0,
+                 range: HQ_RANGE * L.ui, turretT: 0.6, calm: 0 };
+  G.enemyHQ  = { side: "red",  isHQ: true, x: W - m, y: f.y + f.h / 2, hp: HQ_HP, maxHp: HQ_HP, flash: 0,
+                 range: HQ_RANGE * L.ui, turretT: 0.6, calm: 0 };
+  G.frontX = W / 2;
+  G.kb.x = G.playerHQ.x + DEPLOY_LINE * L.ui;
+  G.kb.y = f.y + f.h / 2;
+}
+
+function endGame(reason) {
+  if (G.screen === "over") return;
+  G.endReason = reason;
+  var pct = clamp(G.frontX / W, 0, 1);
+  var win;
+  if (G.enemyHQ.hp <= 0) win = "blue";
+  else if (G.playerHQ.hp <= 0) win = "red";
+  else win = pct >= 0.5 ? "blue" : "red";
+  G.result = { win: win, pct: pct };
+  G.screen = "over";
+}
+
+/* ------------------------------ spawning ------------------------------- */
+function pickLane(side, x) {
+  var f = L.field;
+  var pad = 24 * L.ui;
+  var top = f.y + pad, bot = f.y + f.h - pad;
+  if (bot <= top) return f.y + f.h / 2;
+  var best = top, bestScore = -1;
+  for (var i = 0; i < 7; i++) {
+    var y = top + Math.random() * (bot - top);
+    var score = 1e9, j;
+    for (j = 0; j < G.units.length; j++) {
+      var u = G.units[j];
+      if (u.side !== side) continue;
+      var d = Math.abs(u.y - y) + Math.abs(u.x - x) * 0.25;
+      if (d < score) score = d;
+    }
+    if (score > bestScore) { bestScore = score; best = y; }
+  }
+  return best;
+}
+
+function countSide(side) {
+  var n = 0;
+  for (var i = 0; i < G.units.length; i++) if (G.units[i].side === side) n++;
+  return n;
+}
+
+function spawnUnit(side, type, x, preferY) {
+  var d = UNITS[type];
+  if (!d || d.instant) return null;
+  if (countSide(side) >= MAX_UNITS_PER_SIDE) return null;
+  var mul = side === "red" ? DIFFS[G.diff].stat : 1;
+  var f = L.field;
+  var pad = 18 * L.ui;
+  var lane = pickLane(side, x);
+  if (typeof preferY === "number" && isFinite(preferY)) {
+    // blend the player's click with the anti-crowding pick
+    lane = (clamp(preferY, f.y + pad, f.y + f.h - pad) + lane) / 2;
+  }
+  var u = {
+    id: uid++, side: side, key: type, isHQ: false,
+    x: clamp(x, 10, W - 10),
+    y: lane,
+    hp: d.hp * mul, maxHp: d.hp * mul,
+    speed: d.speed * L.ui * 0.92,
+    range: d.range * L.ui,
+    dmg: d.dmg * mul,
+    rate: d.rate,
+    splash: d.splash ? d.splash * L.ui : 0,
+    atkT: 0.3 + Math.random() * 0.35,
+    flash: 0,
+    walk: Math.random() * 6,
+    seed: (Math.random() * 1e9) | 0,
+    size: (type === "tank" ? 0.86 : (type === "mg" ? 0.8 : 0.74)) * L.ui
+  };
+  G.units.push(u);
+  return u;
+}
+
+// Both armies march out of their own defence line and push towards the front.
+var DEPLOY_LINE = 68;      // px behind the HQ, at ui 1
+
+function deployLineX(side) {
+  var hq = side === "blue" ? G.playerHQ.x : G.enemyHQ.x;
+  var dir = side === "blue" ? 1 : -1;
+  return hq + dir * (DEPLOY_LINE + (Math.random() * 2 - 1) * 22) * L.ui;
+}
+
+function playerSpawnX() {
+  // never left of the line, never past the trench
+  return clamp(Math.min(deployLineX("blue"), G.frontX - 24 * L.ui), 12, W - 14);
+}
+
+function enemySpawnX() {
+  // enemy troops march out of their own defence line on the far right — they no
+  // longer materialise next to the front.
+  return clamp(Math.max(deployLineX("red"), G.frontX + 24 * L.ui), 12, W - 14);
+}
+
+/* ----------------------------- projectiles ----------------------------- */
+function spawnBullet(from, target, dmg) {
+  var tx, ty;
+  if (target.isHQ) { tx = target.x; ty = target.y + (Math.random() * 2 - 1) * 20 * L.ui; }
+  else { tx = target.x; ty = target.y; }
+  G.projs.push({
+    kind: "bullet", side: from.side,
+    x: from.x + (from.side === "blue" ? 10 : -10) * L.ui,
+    y: from.y - 2 * L.ui,
+    target: target, tx: tx, ty: ty,
+    speed: 520 * L.ui, dmg: dmg, dead: false,
+    seed: (Math.random() * 1e9) | 0
+  });
+}
+
+function spawnShell(from, target, dmg, splash) {
+  var tx, ty;
+  if (target.isHQ) {
+    tx = target.x;
+    ty = target.y + (Math.random() * 2 - 1) * 20 * L.ui;
+  } else {
+    // Lead a target that is actually walking: aim where it will be when the
+    // shell lands. A unit that has stopped to shoot is aimed at directly.
+    var flight = clamp(Math.abs(target.x - from.x) / (300 * L.ui), 0.35, 1.6);
+    var tdir = target.side === "blue" ? 1 : -1;
+    var lead = target.attacking ? 0 : tdir * target.speed * flight;
+    tx = target.x + lead;
+    ty = target.y + (Math.random() * 2 - 1) * 12 * L.ui;
+  }
+  var dist = Math.abs(tx - from.x);
+  G.projs.push({
+    kind: "shell", side: from.side,
+    x: from.x, y: from.y, sx: from.x, sy: from.y,
+    tx: tx, ty: ty, t: 0, dur: clamp(dist / (300 * L.ui), 0.35, 1.6),
+    dmg: dmg, splash: splash, dead: false,
+    seed: (Math.random() * 1e9) | 0
+  });
+}
+
+function spawnInkBlot(side, tx, ty, dmg, radius) {
+  var from = side === "blue" ? G.playerHQ : G.enemyHQ;
+  var dist = Math.hypot(tx - from.x, ty - from.y);
+  G.projs.push({
+    kind: "blot", side: side,
+    x: from.x, y: from.y, sx: from.x, sy: from.y,
+    tx: tx, ty: ty, t: 0, dur: clamp(dist / (520 * L.ui), 0.3, 1.1),
+    dmg: dmg, splash: radius, dead: false,
+    seed: (Math.random() * 1e9) | 0
+  });
+}
+
+/* -------------------------------- combat ------------------------------- */
+function onOwnSoil(u) {
+  return u.side === "blue" ? (u.x < G.frontX) : (u.x > G.frontX);
+}
+
+function damageUnit(u, dmg) {
+  if (u.hp <= 0) return;
+  if (onOwnSoil(u)) dmg *= 0.5;          // 50% damage reduction on your own territory
+  u.hp -= dmg;
+  u.flash = 0.16;
+  if (u.hp <= 0) killUnit(u);
+}
+
+function killUnit(u) {
+  u.hp = 0;
+  splat(u.x, u.y, u.side === "blue" ? C.blue : C.red, 10 * L.ui, (Math.random() * 1e9) | 0);
+  var i = G.units.indexOf(u);
+  if (i >= 0) G.units.splice(i, 1);
+}
+
+function damageHQ(hq, dmg) {
+  hq.hp -= dmg;
+  hq.flash = 0.2;
+  if (hq.hp <= 0) {
+    hq.hp = 0;
+    var n = 22;
+    for (var i = 0; i < n; i++) {
+      splat(hq.x + (Math.random() * 2 - 1) * 50 * L.ui,
+            hq.y + (Math.random() * 2 - 1) * 90 * L.ui,
+            hq.side === "blue" ? C.blue : C.red, 14 * L.ui, (Math.random() * 1e9) | 0);
+    }
+    endGame(hq.side === "red" ? "hq" : "hqLost");
+  }
+}
+
+// Combat is fought along one axis, so a shell or a blot inks a tall column of
+// trench rather than a circle. SPLASH_SQUASH squashes the vertical axis.
+var SPLASH_SQUASH = 0.5;
+
+function splashDist(ax, ay, bx, by, radius) {
+  // Squash the vertical axis, but never so little that a blot fails to cover the
+  // whole trench column — the field is taller than it is wide on some windows.
+  var k = Math.min(SPLASH_SQUASH, 0.85 * radius / Math.max(1, L.field.h * 0.5));
+  var dx = ax - bx, dy = (ay - by) * k;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function areaDamage(side, x, y, radius, dmg) {
+  var hits = 0;
+  for (var i = G.units.length - 1; i >= 0; i--) {
+    var u = G.units[i];
+    if (u.side === side) continue;
+    var d = splashDist(u.x, u.y, x, y, radius);
+    if (d <= radius) {
+      var f = 1 - (d / radius) * 0.55;
+      damageUnit(u, dmg * f);
+      hits++;
+    }
+  }
+  var hq = side === "blue" ? G.enemyHQ : G.playerHQ;
+  if (Math.abs(hq.x - x) < radius * 0.8) { damageHQ(hq, dmg * 0.35); hits++; }
+  return hits;
+}
+
+/* --------------------------------- fx ---------------------------------- */
+function splat(x, y, color, size, seed, yScale) {
+  yScale = yScale || 1;
+  var r = mulberry32(seed);
+  var dots = [];
+  for (var i = 0; i < 9; i++) {
+    var a = r() * 6.2832, d = r() * size;
+    dots.push({ x: Math.cos(a) * d, y: Math.sin(a) * d * yScale, r: 1 + r() * size * 0.22 });
+  }
+  G.fx.push({ type: "splat", x: x, y: y, dots: dots, color: color, t: 0, life: 0.65, size: size });
+}
+function ring(x, y, radius, color) {
+  G.fx.push({ type: "ring", x: x, y: y, r0: radius * 0.25, r1: radius, color: color,
+              t: 0, life: 0.5, ys: SPLASH_SQUASH });
+}
+
+/* ------------------------------- update -------------------------------- */
+// The side that is losing ground writes faster: a small comeback trickle so one
+// bad clash does not decide the whole match.
+function comebackMul(side) {
+  var share = side === "blue" ? G.frontX / W : 1 - G.frontX / W;
+  if (share >= 0.45) return 1;
+  return 1 + (0.45 - share) * 1.6;
+}
+
+function update(dt) {
+  G.t += dt;
+  // timer
+  G.time -= dt;
+  if (G.time <= 0) { G.time = 0; endGame("time"); return; }
+
+  // ink economy (with a comeback trickle for whoever is being pushed back)
+  G.ink = Math.min(10, G.ink + PLAYER_REGEN * comebackMul("blue") * dt);
+  G.aiInk = Math.min(10, G.aiInk + DIFFS[G.diff].regen * comebackMul("red") * dt);
+
+  updateAI(dt);
+  updateUnits(dt);
+  updateProjectiles(dt);
+  if (G.screen !== "playing") return;   // a headquarters may have just fallen
+  updateFront(dt);
+  updateFX(dt);
+  updateHQDefense(G.playerHQ, dt);
+  updateHQDefense(G.enemyHQ, dt);
+  regenerateHQ(G.playerHQ, dt);
+  regenerateHQ(G.enemyHQ, dt);
+
+  G.playerHQ.flash = Math.max(0, G.playerHQ.flash - dt);
+  G.enemyHQ.flash = Math.max(0, G.enemyHQ.flash - dt);
+  if (G.hintT > 0) G.hintT -= dt;
+}
+
+// A headquarters that is not under attack patches its own sandbags back up.
+function regenerateHQ(hq, dt) {
+  var foe = hq.side === "blue" ? "red" : "blue";
+  var threat = false;
+  for (var i = 0; i < G.units.length; i++) {
+    var u = G.units[i];
+    if (u.side === foe && Math.abs(u.x - hq.x) < 175 * L.ui) { threat = true; break; }
+  }
+  if (threat) { hq.calm = 0; return; }
+  hq.calm = (hq.calm || 0) + dt;
+  if (hq.calm > 4 && hq.hp < hq.maxHp) {
+    hq.hp = Math.min(hq.maxHp, hq.hp + HQ_REGEN * dt);
+  }
+}
+
+// The HQ watchtower keeps lone raiders from strolling in and ending the match.
+function updateHQDefense(hq, dt) {
+  hq.turretT = (hq.turretT || 0) - dt;
+  if (hq.hp <= 0) return;
+  var best = null, bestD = hq.range;
+  for (var i = 0; i < G.units.length; i++) {
+    var u = G.units[i];
+    if (u.side === hq.side) continue;
+    var d = Math.abs(u.x - hq.x);
+    if (d < bestD) { bestD = d; best = u; }
+  }
+  if (best && hq.turretT <= 0) {
+    hq.turretT = HQ_RATE;
+    G.projs.push({
+      kind: "bullet", side: hq.side,
+      x: hq.x + (hq.side === "blue" ? 16 : -16) * L.ui,
+      y: hq.y - 30 * L.ui,
+      target: best, tx: best.x, ty: best.y,
+      speed: 620 * L.ui, dmg: HQ_DPS, dead: false, seed: 0
+    });
+  }
+}
+
+function updateUnits(dt) {
+  var i, j, u;
+  for (i = 0; i < G.units.length; i++) {
+    u = G.units[i];
+    u.flash = Math.max(0, u.flash - dt);
+    u.atkT -= dt;
+
+    // nearest enemy in range (1D combat, x distance)
+    var best = null, bestD = 1e9;
+    for (j = 0; j < G.units.length; j++) {
+      var o = G.units[j];
+      if (o.side === u.side) continue;
+      var d = Math.abs(o.x - u.x);
+      if (d <= u.range && d < bestD) { bestD = d; best = o; }
+    }
+    var hq = u.side === "blue" ? G.enemyHQ : G.playerHQ;
+    var dh = Math.abs(hq.x - u.x);
+    if (dh <= u.range && dh < bestD) { bestD = dh; best = hq; }
+
+    if (best) {
+      u.attacking = true;
+      if (u.atkT <= 0) {
+        u.atkT = u.rate;
+        if (u.key === "artillery") spawnShell(u, best, u.dmg, u.splash);
+        else if (u.isHQ) { /* never */ }
+        else spawnBullet(u, best, u.dmg);
+        muzzle(u);
+      }
+    } else {
+      u.attacking = false;
+      var dir = u.side === "blue" ? 1 : -1;
+      u.x += dir * u.speed * dt;
+      u.walk += dt * 6;
+    }
+    u.x = clamp(u.x, 8, W - 8);
+  }
+
+  // soft separation so the doodles stay readable
+  for (i = 0; i < G.units.length; i++) {
+    for (j = i + 1; j < G.units.length; j++) {
+      var a = G.units[i], b = G.units[j];
+      if (a.side !== b.side) continue;
+      var dx = b.x - a.x, dy = b.y - a.y;
+      if (Math.abs(dx) < 16 * L.ui && Math.abs(dy) < 15 * L.ui) {
+        var push = (15 * L.ui - Math.abs(dy)) * 0.9 * dt * 8;
+        var s = dy >= 0 ? 1 : -1;
+        a.y -= s * push; b.y += s * push;
+      }
+    }
+  }
+  var f = L.field, pad = 18 * L.ui;
+  for (i = 0; i < G.units.length; i++) {
+    G.units[i].y = clamp(G.units[i].y, f.y + pad, f.y + f.h - pad);
+  }
+}
+
+function muzzle(u) {
+  var x = u.x + (u.side === "blue" ? 12 : -12) * L.ui;
+  G.fx.push({ type: "spark", x: x, y: u.y - 3 * L.ui, t: 0, life: 0.12,
+              color: u.side === "blue" ? C.blue : C.red });
+}
+
+function updateProjectiles(dt) {
+  var i;
+  for (i = G.projs.length - 1; i >= 0; i--) {
+    var p = G.projs[i];
+    if (p.kind === "bullet") {
+      var tgt = p.target;
+      if (tgt && (tgt.isHQ ? tgt.hp > 0 : tgt.hp > 0)) { p.tx = tgt.x; p.ty = tgt.y; }
+      var dx = p.tx - p.x, dy = p.ty - p.y;
+      var d = Math.hypot(dx, dy);
+      var step = p.speed * dt;
+      if (d <= step || d < 1) {
+        if (tgt && tgt.hp > 0) {
+          if (tgt.isHQ) damageHQ(tgt, p.dmg); else damageUnit(tgt, p.dmg);
+        }
+        G.projs.splice(i, 1);
+        continue;
+      }
+      p.x += (dx / d) * step; p.y += (dy / d) * step;
+      p.ang = Math.atan2(dy, dx);
+    } else {
+      p.t += dt;
+      var k = p.t / p.dur;
+      if (k >= 1) {
+        // land
+        ring(p.tx, p.ty, p.splash, p.side === "blue" ? C.blue : C.red);
+        splat(p.tx, p.ty, p.side === "blue" ? C.blue : C.red, p.splash * 0.5, p.seed, 1 / SPLASH_SQUASH);
+        areaDamage(p.side, p.tx, p.ty, p.splash, p.dmg);
+        if (p.kind === "blot") {
+          G.frontX += (p.side === "blue" ? 1 : -1) * 46 * L.ui;
+        }
+        G.projs.splice(i, 1);
+        continue;
+      }
+      p.x = lerp(p.sx, p.tx, k);
+      p.y = lerp(p.sy, p.ty, k) - Math.sin(k * Math.PI) * (p.kind === "blot" ? 70 : 46) * L.ui;
+    }
+  }
+}
+
+function updateFront(dt) {
+  var i, blues = [], reds = [], u;
+  for (i = 0; i < G.units.length; i++) {
+    u = G.units[i];
+    if (u.side === "blue") blues.push(u.x); else reds.push(u.x);
+  }
+  // average of the three deepest units per side: one lucky scout cannot yank the line
+  blues.sort(function (a, b) { return b - a; });
+  reds.sort(function (a, b) { return a - b; });
+
+  var pLead = G.playerHQ.x + 46 * L.ui;
+  var eLead = G.enemyHQ.x - 46 * L.ui;
+  var K = 3, s, n;
+  if (blues.length) {
+    s = 0; n = Math.min(K, blues.length);
+    for (i = 0; i < n; i++) s += blues[i];
+    pLead = Math.max(pLead, s / n);
+  }
+  if (reds.length) {
+    s = 0; n = Math.min(K, reds.length);
+    for (i = 0; i < n; i++) s += reds[i];
+    eLead = Math.min(eLead, s / n);
+  }
+
+  var margin = 72 * L.ui;
+  var target = clamp((pLead + eLead) / 2, margin, W - margin);
+
+  // Ground near a headquarters is fortified: the line crawls there, which buys a
+  // beaten side the time to rally instead of losing the match in one bad minute.
+  var home = W * 0.24;
+  var resist = 1;
+  if (target > W - home || target < home) resist = 0.42;
+
+  var spd = FRONT_SPEED * L.ui * resist;
+  G.frontX += clamp(target - G.frontX, -spd * dt, spd * dt);
+  G.frontX = clamp(G.frontX, margin * 0.5, W - margin * 0.5);
+}
+
+function updateFX(dt) {
+  for (var i = G.fx.length - 1; i >= 0; i--) {
+    G.fx[i].t += dt;
+    if (G.fx[i].t >= G.fx[i].life) G.fx.splice(i, 1);
+  }
+}
+
+/* --------------------------------- AI ---------------------------------- */
+function aiComposition() {
+  var c = { soldier: 0, mg: 0, tank: 0, artillery: 0, total: 0 };
+  for (var i = 0; i < G.units.length; i++) {
+    var u = G.units[i];
+    if (u.side !== "blue") continue;
+    c[u.key] = (c[u.key] || 0) + 1;
+    c.total++;
+  }
+  return c;
+}
+
+function clusterOfBlueUnits(minCount) {
+  var best = null, bestN = 0;
+  for (var i = 0; i < G.units.length; i++) {
+    var a = G.units[i];
+    if (a.side !== "blue") continue;
+    var n = 0;
+    for (var j = 0; j < G.units.length; j++) {
+      var b = G.units[j];
+      if (b.side !== "blue") continue;
+      if (Math.abs(a.x - b.x) < 105 * L.ui && Math.abs(a.y - b.y) < 110 * L.ui) n++;
+    }
+    if (n > bestN) { bestN = n; best = a; }
+  }
+  return bestN >= minCount ? best : null;
+}
+
+function pickAIType() {
+  var dd = DIFFS[G.diff];
+  var ink = G.aiInk;
+  var c = aiComposition();
+
+  if (dd.smart === 0) {
+    // Recruit: cheap, mostly random, never reads the board.
+    var pool = [["soldier", 5], ["mg", 2], ["tank", 2], ["artillery", 1]];
+    var avail = [];
+    for (var i = 0; i < pool.length; i++) {
+      if (UNITS[pool[i][0]].cost <= ink) avail.push(pool[i]);
+    }
+    if (!avail.length) return null;
+    return shuffleWeighted(avail);
+  }
+
+  // Never sit on a full ink meter — that is how an army loses the field.
+  if (ink >= 8.5) {
+    var rich = [["soldier", 1]];
+    if (ink >= 2) rich.push(["mg", 1]);
+    if (ink >= 3) rich.push(["tank", 1.4]);
+    if (ink >= 4) rich.push(["artillery", 1]);
+    if (ink >= 5) rich.push(["ink", 0.8]);
+    return shuffleWeighted(rich.filter(function (p) { return UNITS[p[0]].cost <= ink; }));
+  }
+
+  var opts = [];
+  var soldierShare = c.total ? c.soldier / c.total : 0;
+
+  // counter-picks
+  if (c.soldier >= 2 && ink >= 2) opts.push(["mg", 2.6 * dd.smart]);        // guns beat crowds
+  if (c.tank >= 1 && ink >= 4) opts.push(["artillery", 2.4 * dd.smart]);    // guns crack armour
+  if (c.mg >= 1 && ink >= 3) opts.push(["tank", 2.4 * dd.smart]);           // armour closes on guns
+  if (c.artillery >= 1 && ink >= 1) opts.push(["soldier", 2.2 * dd.smart]); // swarm the artillery
+
+  // baseline army shape: a cheap core, one gun, one anchor
+  if (ink >= 1) opts.push(["soldier", soldierShare > 0.62 ? 0.7 : 2.2]);
+  if (ink >= 2) opts.push(["mg", c.mg < 2 ? 1.2 : 0.5]);
+  if (ink >= 3) opts.push(["tank", c.tank < Math.max(1, Math.floor(c.total / 4)) ? 1.5 : 0.7]);
+  if (ink >= 4) opts.push(["artillery", c.artillery < 2 ? 0.9 : 0.25]);
+
+  if (dd.smart >= 1) {
+    // General keeps its powder dry for armour when it has none and the field is small.
+    if (ink < 6 && c.tank === 0 && c.total > 2 && Math.random() < 0.5) {
+      return "soldier";
+    }
+  }
+  if (!opts.length) return null;
+  return shuffleWeighted(opts);
+}
+
+function updateAI(dt) {
+  var dd = DIFFS[G.diff];
+  G.aiTimer -= dt;
+  if (G.aiTimer > 0) return;
+  G.aiTimer = dd.think * (0.75 + Math.random() * 0.5);
+
+  if (countSide("red") >= MAX_UNITS_PER_SIDE) return;
+
+  // Ink Splash only when it genuinely pays: a real cluster, or a full meter.
+  if (dd.smart > 0 && G.aiInk >= 5) {
+    var want = dd.smart >= 1 ? 4 : 5;
+    var cl = clusterOfBlueUnits(want);
+    if (cl && (G.aiInk >= 9 || Math.random() < 0.35 + dd.smart * 0.3)) {
+      G.aiInk -= UNITS.ink.cost;
+      spawnInkBlot("red", cl.x, cl.y, UNITS.ink.dmg, UNITS.ink.radius * L.ui);
+      return;
+    }
+  }
+
+  // Because troops must now march all the way from the red line, the AI saves up
+  // and releases a whole group at once — the way a player clicking quickly would.
+  var urgent = G.frontX > W * 0.60;
+  if (G.aiInk < (urgent ? 1 : dd.wave)) return;
+
+  var released = 0;
+  while (released < 5 && countSide("red") < MAX_UNITS_PER_SIDE) {
+    var type = pickAIType();
+    if (!type) break;
+    var cost = UNITS[type].cost;
+    if (G.aiInk < cost) break;
+    G.aiInk -= cost;
+    released++;
+
+    if (type === "ink") {
+      var tgt = clusterOfBlueUnits(3);
+      spawnInkBlot("red", tgt ? tgt.x : G.frontX - 40 * L.ui,
+                   tgt ? tgt.y : L.field.y + L.field.h / 2,
+                   UNITS.ink.dmg, UNITS.ink.radius * L.ui);
+    } else {
+      spawnUnit("red", type, enemySpawnX());
+    }
+  }
+}
+
+/* ------------------------------- input --------------------------------- */
+function canvasPos(e) {
+  var r = cvs.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (W / r.width),
+    y: (e.clientY - r.top) * (H / r.height)
+  };
+}
+
+function hitButton(x, y) {
+  for (var i = buttons.length - 1; i >= 0; i--) {
+    var b = buttons[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b;
+  }
+  return null;
+}
+
+function setHint(msg) {
+  G.hint = msg;
+  G.hintT = 2.0;
+}
+
+function selectCard(key) {
+  if (!UNITS[key]) return;
+  if (G.ink >= UNITS[key].cost) G.selected = (G.selected === key) ? null : key;
+  else setHint("墨水不足 · Not enough ink");
+}
+
+function gameClick(x, y, keepSelection) {
+  // battlefield only — the deployment bar is handled by its card buttons
+  if (y < L.field.y || y > L.field.y + L.field.h) return;
+
+  if (!G.selected) { setHint("先点选下方单位卡 · Pick a unit card first"); return; }
+  var def = UNITS[G.selected];
+  if (G.ink < def.cost) { setHint("墨水不足 · Not enough ink"); return; }
+
+  if (def.instant) {
+    G.ink -= def.cost;
+    spawnInkBlot("blue", x, y, def.dmg, def.radius * L.ui);
+    G.selected = keepSelection ? G.selected : null;
+    return;
+  }
+
+  if (x > G.frontX - 14 * L.ui) {
+    setHint("只能在蓝色领土部署 · Deploy on blue soil only");
+    return;
+  }
+  // Spawn first, pay only if a unit actually appeared.
+  var made = spawnUnit("blue", G.selected, playerSpawnX(), y);
+  if (!made) {
+    setHint("部队已满 " + MAX_UNITS_PER_SIDE + " · Unit limit reached");
+    return;
+  }
+  G.ink -= def.cost;
+  G.selected = keepSelection ? G.selected : null;
+}
+
+cvs.addEventListener("pointerdown", function (e) {
+  e.preventDefault();
+  var p = canvasPos(e);
+  G.mouse.x = p.x; G.mouse.y = p.y;
+  G.kb.active = false;                 // the mouse takes over the aim
+
+  var b = hitButton(p.x, p.y);
+  if (b) { b.action(); return; }
+
+  if (G.screen === "playing" && !G.paused) gameClick(p.x, p.y);
+});
+
+cvs.addEventListener("pointermove", function (e) {
+  var p = canvasPos(e);
+  G.mouse.x = p.x; G.mouse.y = p.y;
+  G.kb.active = false;                 // the mouse takes over the aim
+});
+
+cvs.addEventListener("pointerleave", function () {
+  G.mouse.x = -9999; G.mouse.y = -9999;
+});
+
+cvs.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+/* --------------------------- keyboard controls -------------------------
+   1-5      pick a unit card          arrows / WASD  move the aim cursor
+   Space    deploy at the cursor      Shift + move   move faster
+   Esc      cancel / close            P pause        F  1x / 2x speed
+   H or ?   this shortcut list        G unit guide   Enter play / again     */
+var MOVE_KEYS = {
+  ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
+  a: [-1, 0], d: [1, 0], w: [0, -1], s: [0, 1],
+  A: [-1, 0], D: [1, 0], W: [0, -1], S: [0, 1]
+};
+
+function moveAim(dx, dy, fast) {
+  var f = L.field;
+  if (!G.kb.active) {
+    // first key press: start from wherever the mouse was, if it is on the field
+    G.kb.active = true;
+    var m = G.mouse;
+    G.kb.x = (m.x > 0 && m.x < W) ? m.x : G.playerHQ.x + DEPLOY_LINE * L.ui;
+    G.kb.y = (m.y > f.y && m.y < f.y + f.h) ? m.y : f.y + f.h / 2;
+    if (G.selected && UNITS[G.selected].instant) return;   // don't also nudge on the first press
+  }
+  var step = (fast ? 46 : 15) * L.ui;
+  G.kb.x = clamp(G.kb.x + dx * step, 6, W - 6);
+  G.kb.y = clamp(G.kb.y + dy * step, f.y + 10 * L.ui, f.y + f.h - 10 * L.ui);
+}
+
+function keyboardDeploy() {
+  if (G.screen !== "playing" || G.paused) return;
+  if (!G.selected) { setHint("先点选单位卡 · Pick a unit card (1-5) first"); return; }
+  G.kb.active = true;
+  var def = UNITS[G.selected];
+  // troops always march from the deploy line, so only the lane comes from the cursor
+  gameClick(def.instant ? G.kb.x : playerSpawnX(), G.kb.y, true);
+  G.kb.active = true;                  // deploying by key keeps the card selected
+}
+
+function setHelp(open) {
+  G.helpOpen = open;
+  if (open) {
+    // never let the battle run on behind the help card
+    if (G.screen === "playing" && !G.paused) { G.paused = true; G.helpPaused = true; }
+  } else if (G.helpPaused) {
+    G.paused = false;
+    G.helpPaused = false;
+  }
+}
+
+window.addEventListener("keydown", function (e) {
+  var k = e.key;
+  var key = (k.length === 1) ? k.toLowerCase() : k;
+
+  // help overlay works everywhere
+  if (key === "h" || k === "?" || k === "/") { setHelp(!G.helpOpen); e.preventDefault(); return; }
+  if (G.helpOpen) {
+    if (k === "Escape" || k === "Enter" || k === " ") setHelp(false);
+    e.preventDefault();
+    return;
+  }
+
+  if (G.screen === "menu") {
+    if (key === "1") G.diff = "recruit";
+    else if (key === "2") G.diff = "sergeant";
+    else if (key === "3") G.diff = "general";
+    else if (k === "Enter" || k === " ") { startGame(G.diff); e.preventDefault(); }
+    else if (key === "g") G.guideOpen = !G.guideOpen;
+    else if (k === "Escape") G.guideOpen = false;
+    else if (k === "ArrowLeft" || k === "ArrowRight") {
+      var order = ["recruit", "sergeant", "general"];
+      var i = order.indexOf(G.diff) + (k === "ArrowRight" ? 1 : -1);
+      G.diff = order[clamp(i, 0, 2)];
+    }
+    return;
+  }
+
+  if (G.screen === "over") {
+    if (k === "Enter" || k === " ") { startGame(G.diff); e.preventDefault(); }
+    else if (k === "Escape" || key === "m") G.screen = "menu";
+    return;
+  }
+
+  // ---- in a match ----
+  if (k === "Escape") { G.selected = null; G.kb.active = false; return; }
+  if (key === "p") { G.paused = !G.paused; return; }
+  if (key === "f") { G.speed = G.speed === 1 ? 2 : 1; return; }
+  if (key >= "1" && key <= "5") {
+    var pick = ORDER[parseInt(key, 10) - 1];
+    if (pick) {
+      selectCard(pick);
+      if (G.selected && !G.kb.active) moveAim(0, 0, false);   // bring the cursor up
+    }
+    return;
+  }
+  if (key === "q" || key === "e") {                        // cycle cards
+    var idx = G.selected ? ORDER.indexOf(G.selected) : -1;
+    idx = (idx + (key === "e" ? 1 : ORDER.length - 1)) % ORDER.length;
+    selectCard(ORDER[idx]);
+    if (G.selected && !G.kb.active) moveAim(0, 0, false);
+    return;
+  }
+  if (k === " " || k === "Enter") {
+    e.preventDefault();
+    if (G.paused) { G.paused = false; return; }
+    keyboardDeploy();
+    return;
+  }
+  if (MOVE_KEYS[k]) {
+    e.preventDefault();
+    moveAim(MOVE_KEYS[k][0], MOVE_KEYS[k][1], e.shiftKey);
+  }
+});
+
+/* ------------------------------ rendering ------------------------------ */
+function render() {
+  buttons.length = 0;
+  BTN_ON = (G.screen !== "over");
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(paperCv, 0, 0, W, H);
+
+  if (G.screen === "menu") drawMenu();
+  else drawGame();
+
+  if (G.screen === "over") { BTN_ON = true; drawOver(); }
+  if (G.helpOpen) { BTN_ON = true; drawHelpModal(); }
+}
+
+// Where a unit would land: the keyboard cursor when the player is on the keys,
+// otherwise the mouse pointer.
+function aimPoint() {
+  var f = L.field;
+  var src = G.kb.active ? G.kb : G.mouse;
+  var x = clamp(src.x, 0, W);
+  var y = clamp(src.y, f.y + 8 * L.ui, f.y + f.h - 8 * L.ui);
+  return { x: x, y: y, kb: G.kb.active };
+}
+
+function drawDeployGuide() {
+  var aim = aimPoint();
+  if (!G.selected) {
+    if (aim.kb) drawReticle(aim.x, aim.y, 30 * L.ui);
+    return;
+  }
+  var ui = L.ui, f = L.field;
+  var def = UNITS[G.selected];
+  var lx = G.playerHQ.x + DEPLOY_LINE * ui;
+  var my = aim.y;
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, f.y, W, f.h); ctx.clip();
+
+  if (def.instant) {
+    // show exactly which trench column the blot will ink
+    var band = def.radius * ui;
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = "rgba(23,53,156,0.13)";
+    ctx.fillRect(aim.x - band, f.y, band * 2, f.h);
+    ctx.strokeStyle = C.blue;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8 * ui, 6 * ui]);
+    ctx.beginPath();
+    ctx.moveTo(aim.x - band, f.y + 4);
+    ctx.lineTo(aim.x - band, f.y + f.h - 4);
+    ctx.moveTo(aim.x + band, f.y + 4);
+    ctx.lineTo(aim.x + band, f.y + f.h - 4);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.arc(aim.x, my, 13 * ui, 0, 6.2832);
+    ctx.stroke();
+    ctx.strokeStyle = C.blueDeep;
+    ctx.beginPath();
+    ctx.moveTo(aim.x - 18 * ui, my); ctx.lineTo(aim.x + 18 * ui, my);
+    ctx.moveTo(aim.x, my - 18 * ui); ctx.lineTo(aim.x, my + 18 * ui);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = C.blue;
+    ctx.font = "bold " + Math.round(11 * ui) + "px " + FONT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText("blot lands here", aim.x, f.y + 14 * ui);
+    ctx.restore();
+    ctx.textAlign = "left";
+    return;
+  }
+
+  // dashed line the troops will march out of
+  ctx.strokeStyle = "rgba(23,53,156,0.55)";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([7 * ui, 6 * ui]);
+  ctx.beginPath();
+  ctx.moveTo(lx, f.y + 4);
+  ctx.lineTo(lx, f.y + f.h - 4);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // lane marker: where in the line this unit will march
+  ctx.strokeStyle = "rgba(23,53,156,0.85)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(lx - 12 * ui, my);
+  ctx.lineTo(lx + 12 * ui, my);
+  ctx.stroke();
+
+  // ghost of the unit about to appear
+  var sp = unitSprite(G.selected, "blue");
+  var s = sp.size * 0.78 * ui;
+  ctx.globalAlpha = 0.42;
+  ctx.drawImage(sp.canvas, lx - s / 2, my - s / 2, s, s);
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = C.blue;
+  ctx.font = "bold " + Math.round(11 * ui) + "px " + FONT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("deploy line", lx, f.y + 14 * ui);
+  ctx.restore();
+  ctx.textAlign = "left";
+
+  // keyboard reticle
+  if (aim.kb) drawReticle(lx, my, s);
+}
+
+function drawReticle(x, y, s) {
+  var ui = L.ui;
+  ctx.save();
+  ctx.strokeStyle = "rgba(16,29,74,0.9)";
+  ctx.lineWidth = 2;
+  var r = Math.max(s * 0.55, 16 * ui);
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, 6.2832);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - r - 6 * ui, y); ctx.lineTo(x - r + 2 * ui, y);
+  ctx.moveTo(x + r - 2 * ui, y); ctx.lineTo(x + r + 6 * ui, y);
+  ctx.moveTo(x, y - r - 6 * ui); ctx.lineTo(x, y - r + 2 * ui);
+  ctx.moveTo(x, y + r - 2 * ui); ctx.lineTo(x, y + r + 6 * ui);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawGame() {
+  drawTerritory();
+  drawDecor();
+  drawHQ(G.playerHQ);
+  drawHQ(G.enemyHQ);
+  drawFront();
+  drawDeployGuide();
+  drawUnits();
+  drawProjectiles();
+  drawFX();
+  drawHUD();
+  drawBar();
+  drawHint();
+  if (G.paused && !G.helpOpen) drawPaused();
+}
+
+/* --- battlefield --- */
+function drawTerritory() {
+  var f = L.field;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, f.y, W, f.h); ctx.clip();
+
+  ctx.fillStyle = "rgba(84,126,205,0.10)";
+  ctx.fillRect(0, f.y, G.frontX, f.h);
+  ctx.fillStyle = "rgba(198,63,68,0.09)";
+  ctx.fillRect(G.frontX, f.y, W - G.frontX, f.h);
+
+  ctx.globalAlpha = 0.30;
+  ctx.fillStyle = bluePat;
+  ctx.fillRect(0, f.y, G.frontX, f.h);
+  ctx.fillStyle = redPat;
+  ctx.fillRect(G.frontX, f.y, W - G.frontX, f.h);
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawDecor() {
+  var f = L.field;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, f.y, W, f.h); ctx.clip();
+  ctx.globalAlpha = 0.30;
+  ctx.lineWidth = 1.4;
+  for (var i = 0; i < G.decor.length; i++) {
+    var d = G.decor[i];
+    var blue = d.x < G.frontX;
+    ctx.strokeStyle = blue ? C.blue : C.red;
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.rotate(d.rot);
+    var rng = mulberry32(d.seed);
+    if (d.t === "cross") crossMark(ctx, 0, 0, d.s, rng);
+    else if (d.t === "star") starBurst(ctx, 0, 0, d.s, rng, 7);
+    else sketchCircle(ctx, 0, 0, d.s * 0.8, d.seed, 0.8);
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawFront() {
+  var f = L.field;
+  var fx = G.frontX;
+  var rng = mulberry32(991);
+  var y;
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, f.y, W, f.h); ctx.clip();
+
+  // trench hatching band
+  ctx.strokeStyle = "rgba(26,36,64,0.42)";
+  ctx.lineWidth = 1.3;
+  for (y = f.y - 12; y < f.y + f.h + 12; y += 7) {
+    var w = 7 * L.ui + Math.sin((y + G.t * 4) * 0.05) * 2.5;
+    ctx.beginPath(); ctx.moveTo(fx - w, y); ctx.lineTo(fx + w, y + 7); ctx.stroke();
+  }
+
+  // the front line itself: wobbly ink strokes
+  ctx.strokeStyle = "#1b2a52";
+  ctx.lineWidth = 2.1;
+  ctx.lineCap = "round";
+  for (var p = 0; p < 2; p++) {
+    ctx.beginPath();
+    for (y = f.y; y <= f.y + f.h; y += 14) {
+      var x = fx + Math.sin(y * 0.03 + p * 1.9) * 5 * L.ui + (rng() * 2 - 1) * 2;
+      if (y === f.y) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // barbed crosses along the trench
+  ctx.strokeStyle = "rgba(26,36,64,0.75)";
+  ctx.lineWidth = 1.6;
+  for (y = f.y + 22; y < f.y + f.h - 10; y += 36 * L.ui) {
+    crossMark(ctx, fx + (rng() * 2 - 1) * 6 * L.ui, y, 6 * L.ui, rng);
+  }
+  ctx.restore();
+}
+
+function drawHQ(hq) {
+  var f = L.field;
+  var ui = L.ui;
+  var dir = hq.side === "blue" ? 1 : -1;
+  var col = hq.side === "blue" ? C.blue : C.red;
+  var rng = mulberry32(hq.side === "blue" ? 555 : 777);
+  var wallX = hq.x + dir * 30 * ui;
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, f.y, W, f.h); ctx.clip();
+  ctx.strokeStyle = col;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  // defensive wire
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(wallX, f.y + 6); ctx.lineTo(wallX, f.y + f.h - 6);
+  ctx.stroke();
+  ctx.lineWidth = 1.5;
+  for (var y = f.y + 14; y < f.y + f.h - 10; y += 22 * ui) {
+    sketchCircle(ctx, wallX, y, 4.5 * ui, (rng() * 1e9) | 0, 0.7);
+  }
+
+  // fortress block
+  var bw = 44 * ui, bh = 84 * ui;
+  var bx = hq.x - bw / 2, by = hq.y - bh / 2;
+  ctx.lineWidth = 2.2;
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  roundRectPath(ctx, bx, by, bw, bh, 5 * ui);
+  ctx.fill();
+  sketchRoundRect(ctx, bx, by, bw, bh, 5 * ui, hq.side === "blue" ? 21 : 22, 1.1);
+
+  // cross hatch inside
+  ctx.save();
+  roundRectPath(ctx, bx, by, bw, bh, 5 * ui);
+  ctx.clip();
+  ctx.lineWidth = 1.1;
+  ctx.globalAlpha = 0.42;
+  for (var d = -bh; d < bw + bh; d += 7 * ui) {
+    ctx.beginPath();
+    ctx.moveTo(bx + d, by);
+    ctx.lineTo(bx + d - bh, by + bh);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // flag
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.moveTo(hq.x, by - 4 * ui);
+  ctx.lineTo(hq.x, by - 34 * ui);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(hq.x, by - 34 * ui);
+  ctx.lineTo(hq.x + dir * 24 * ui, by - 27 * ui);
+  ctx.lineTo(hq.x, by - 19 * ui);
+  ctx.closePath();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = col;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.stroke();
+
+  // glow when hit
+  if (hq.flash > 0) {
+    ctx.globalAlpha = hq.flash * 2.4;
+    ctx.fillStyle = "#fff";
+    roundRectPath(ctx, bx - 4, by - 4, bw + 8, bh + 8, 6 * ui);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
+function drawUnits() {
+  var i;
+  for (i = 0; i < G.units.length; i++) drawUnit(G.units[i]);
+}
+
+function drawUnit(u) {
+  var sp = unitSprite(u.key, u.side);
+  var s = sp.size * u.size;
+  var bob = u.attacking ? Math.sin(G.t * 9 + u.id) * 1.2 * L.ui
+                        : Math.sin(u.walk) * 1.8 * L.ui;
+  var x = u.x - s / 2;
+  var y = u.y - s / 2 + bob;
+
+  // shield hint: standing on your own soil = 50% less damage
+  if (onOwnSoil(u)) {
+    ctx.save();
+    ctx.globalAlpha = 0.32;
+    ctx.strokeStyle = u.side === "blue" ? C.blue : C.red;
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([4 * L.ui, 3 * L.ui]);
+    ctx.beginPath();
+    ctx.ellipse(u.x, u.y + s * 0.34, s * 0.24, s * 0.08, 0, 0, 6.2832);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.drawImage(sp.canvas, x, y, s, s);
+
+  if (u.flash > 0) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.6, u.flash * 3);
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(u.x, u.y, s * 0.3, 0, 6.2832);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // damage bar only when hurt
+  if (u.hp < u.maxHp - 0.01) {
+    var bw = 22 * L.ui, bh = 3 * L.ui;
+    var bx = u.x - bw / 2, by = u.y - s * 0.42;
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = u.side === "blue" ? C.blue : C.red;
+    ctx.fillRect(bx, by, bw * clamp(u.hp / u.maxHp, 0, 1), bh);
+    ctx.strokeStyle = "rgba(20,30,60,0.5)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, by, bw, bh);
+  }
+}
+
+function drawProjectiles() {
+  for (var i = 0; i < G.projs.length; i++) {
+    var p = G.projs[i];
+    var col = p.side === "blue" ? C.blue : C.red;
+    if (p.kind === "bullet") {
+      var a = p.ang || 0;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.8;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(p.x - Math.cos(a) * 9 * L.ui, p.y - Math.sin(a) * 9 * L.ui);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    } else {
+      // the ground a shell or blot will cover: a band right across the trench
+      ctx.save();
+      ctx.globalAlpha = 0.40;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([5, 5]);
+      var bandW = p.splash * 0.8;
+      ctx.beginPath();
+      ctx.rect(p.tx - bandW, L.field.y + 2, bandW * 2, L.field.h - 4);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(p.tx - bandW, p.ty);
+      ctx.lineTo(p.tx + bandW, p.ty);
+      ctx.stroke();
+      ctx.restore();
+
+      // the flying shell / blot
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, (p.kind === "blot" ? 7 : 3.4) * L.ui, 0, 6.2832);
+      ctx.fill();
+      if (p.kind === "blot") {
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        sketchCircle(ctx, p.x, p.y, 8 * L.ui, p.seed, 1.4);
+      }
+    }
+  }
+}
+
+function drawFX() {
+  var i, j;
+  for (i = 0; i < G.fx.length; i++) {
+    var e = G.fx[i];
+    var k = e.t / e.life;
+    ctx.save();
+    ctx.globalAlpha = (1 - k) * 0.85;
+    if (e.type === "splat") {
+      ctx.fillStyle = e.color;
+      for (j = 0; j < e.dots.length; j++) {
+        var d = e.dots[j];
+        ctx.beginPath();
+        ctx.arc(e.x + d.x * (0.6 + k * 0.9), e.y + d.y * (0.6 + k * 0.9), d.r * (1 - k * 0.4), 0, 6.2832);
+        ctx.fill();
+      }
+    } else if (e.type === "ring") {
+      ctx.strokeStyle = e.color;
+      ctx.lineWidth = 3 * (1 - k) + 1;
+      var rr = lerp(e.r0, e.r1, k);
+      var ry = Math.min(rr / (e.ys || 1), L.field.h / 2 - 2);
+      ctx.beginPath();
+      ctx.ellipse(e.x, e.y, rr, ry, 0, 0, 6.2832);
+      ctx.stroke();
+    } else if (e.type === "spark") {
+      ctx.strokeStyle = e.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (j = 0; j < 5; j++) {
+        var ang = (j / 5) * 6.2832 + e.x;
+        var rr = 7 * L.ui * (0.5 + k);
+        ctx.moveTo(e.x, e.y);
+        ctx.lineTo(e.x + Math.cos(ang) * rr, e.y + Math.sin(ang) * rr);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+/* --- HUD --- */
+function drawHealthBar(x, y, w, h, ratio, side) {
+  var col = side === "blue" ? C.blue : C.red;
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.8)";
+  roundRectPath(ctx, x, y, w, h, h / 2);
+  ctx.fill();
+
+  ctx.save();
+  roundRectPath(ctx, x, y, w, h, h / 2);
+  ctx.clip();
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = side === "blue" ? bluePat : redPat;
+  var fw = w * clamp(ratio, 0, 1);
+  if (side === "blue") ctx.fillRect(x, y, fw, h);
+  else ctx.fillRect(x + w - fw, y, fw, h);
+  ctx.restore();
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#1d2b55";
+  roundRectPath(ctx, x, y, w, h, h / 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHUD() {
+  var ui = L.ui;
+  var pad = 16 * ui;
+  var barW = Math.min(W * 0.30, 330 * ui);
+  var barH = 15 * ui;
+  var top = 12 * ui;
+
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "bold " + Math.round(15 * ui) + "px " + FONT;
+  ctx.textAlign = "left";
+  ctx.fillStyle = C.blue;
+  ctx.fillText("Your HQ", pad, top + 12 * ui);
+  drawHealthBar(pad, top + 18 * ui, barW, barH, G.playerHQ.hp / G.playerHQ.maxHp, "blue");
+
+  ctx.textAlign = "right";
+  ctx.fillStyle = C.red;
+  ctx.fillText("Red HQ", W - pad, top + 12 * ui);
+  drawHealthBar(W - pad - barW, top + 18 * ui, barW, barH, G.enemyHQ.hp / G.enemyHQ.maxHp, "red");
+
+  // clock
+  var t = Math.max(0, Math.ceil(G.time));
+  var mm = Math.floor(t / 60);
+  var ss = t % 60;
+  var label = mm + ":" + (ss < 10 ? "0" : "") + ss;
+  ctx.textAlign = "center";
+  ctx.font = "bold " + Math.round(40 * ui) + "px " + FONT;
+  ctx.fillStyle = G.time <= 20 ? C.red : "#16234c";
+  ctx.fillText(label, W / 2, top + 34 * ui);
+
+  var pct = Math.round(clamp(G.frontX / W, 0, 1) * 100);
+  ctx.font = "bold " + Math.round(15 * ui) + "px " + FONT;
+  ctx.fillStyle = "#28345c";
+  ctx.fillText("Your territory " + pct + "%", W / 2, top + 54 * ui);
+
+  // pause / speed buttons
+  var bs = 26 * ui;
+  var by = L.hudH - bs - 6 * ui;
+  drawIconButton(pad, by, bs, G.paused ? "play" : "pause", function () {
+    G.paused = !G.paused;
+  });
+  drawIconButton(pad + bs + 8 * ui, by, bs, G.speed === 1 ? "ff" : "ffx", function () {
+    G.speed = G.speed === 1 ? 2 : 1;
+  });
+}
+
+function drawIconButton(x, y, s, kind, action) {
+  var hover = G.mouse.x >= x && G.mouse.x <= x + s && G.mouse.y >= y && G.mouse.y <= y + s;
+  ctx.save();
+  ctx.fillStyle = hover ? "rgba(220,232,250,0.95)" : "rgba(255,255,255,0.85)";
+  roundRectPath(ctx, x, y, s, s, 5 * L.ui);
+  ctx.fill();
+  ctx.lineWidth = 1.8;
+  ctx.strokeStyle = "#1d2b55";
+  ctx.stroke();
+
+  ctx.strokeStyle = "#1d2b55";
+  ctx.fillStyle = "#1d2b55";
+  ctx.lineWidth = 2;
+  var cx = x + s / 2, cy = y + s / 2;
+  if (kind === "pause") {
+    ctx.beginPath();
+    ctx.moveTo(cx - 4 * L.ui, cy - 6 * L.ui); ctx.lineTo(cx - 4 * L.ui, cy + 6 * L.ui);
+    ctx.moveTo(cx + 4 * L.ui, cy - 6 * L.ui); ctx.lineTo(cx + 4 * L.ui, cy + 6 * L.ui);
+    ctx.stroke();
+  } else if (kind === "play") {
+    ctx.beginPath();
+    ctx.moveTo(cx - 4 * L.ui, cy - 6 * L.ui);
+    ctx.lineTo(cx + 6 * L.ui, cy);
+    ctx.lineTo(cx - 4 * L.ui, cy + 6 * L.ui);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(cx - 6 * L.ui, cy - 5 * L.ui); ctx.lineTo(cx, cy); ctx.lineTo(cx - 6 * L.ui, cy + 5 * L.ui);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx + 1 * L.ui, cy - 5 * L.ui); ctx.lineTo(cx + 7 * L.ui, cy); ctx.lineTo(cx + 1 * L.ui, cy + 5 * L.ui);
+    ctx.closePath(); ctx.fill();
+    if (kind === "ff") {
+      ctx.font = "bold " + Math.round(9 * L.ui) + "px " + FONT;
+      ctx.fillText("1x", cx - 6 * L.ui, cy + 8 * L.ui);
+    }
+  }
+  ctx.restore();
+  pushButton({ id: "icon-" + kind, x: x, y: y, w: s, h: s, action: action });
+}
+
+/* --- bottom bar --- */
+function cardRects() {
+  var ui = L.ui;
+  var gap = 10 * ui;
+  var n = ORDER.length;
+  var maxW = 148 * ui;
+  var cw = Math.min(maxW, (W - 40 * ui - gap * (n - 1)) / n);
+  var ch = Math.min(L.barH - 44 * ui, 96 * ui);
+  var totalW = cw * n + gap * (n - 1);
+  var x0 = (W - totalW) / 2;
+  var y0 = H - L.barH + 38 * ui;
+  var out = [];
+  for (var i = 0; i < n; i++) {
+    out.push({ x: x0 + i * (cw + gap), y: y0, w: cw, h: ch, key: ORDER[i] });
+  }
+  return out;
+}
+
+function drawBar() {
+  var ui = L.ui;
+  var top = H - L.barH;
+
+  // paper strip + torn edge
+  ctx.save();
+  ctx.fillStyle = "rgba(253,252,245,0.94)";
+  ctx.fillRect(0, top, W, L.barH);
+  ctx.strokeStyle = "rgba(29,43,85,0.5)";
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(0, top);
+  for (var x = 0; x <= W; x += 18) {
+    ctx.lineTo(x, top + Math.sin(x * 0.05) * 2.2 + 1);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // ---- ink meter
+  var mw = Math.min(W * 0.62, 560 * ui);
+  var mh = 24 * ui;
+  var mx = (W - mw) / 2;
+  var my = top + 8 * ui;
+
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  roundRectPath(ctx, mx, my, mw, mh, mh / 2);
+  ctx.fill();
+
+  ctx.save();
+  roundRectPath(ctx, mx, my, mw, mh, mh / 2);
+  ctx.clip();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = bluePat;
+  ctx.fillRect(mx, my, mw * (G.ink / 10), mh);
+  ctx.restore();
+
+  // cell dividers
+  ctx.strokeStyle = "rgba(29,43,85,0.55)";
+  ctx.lineWidth = 1.4;
+  for (var i = 1; i < 10; i++) {
+    var sx = mx + (mw / 10) * i;
+    ctx.beginPath();
+    ctx.moveTo(sx, my + 3 * ui);
+    ctx.lineTo(sx, my + mh - 3 * ui);
+    ctx.stroke();
+  }
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#1d2b55";
+  roundRectPath(ctx, mx, my, mw, mh, mh / 2);
+  ctx.stroke();
+  ctx.restore();
+
+  var inkShown = Math.floor(G.ink);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(14 * ui) + "px " + FONT;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  var inkLabel = "Ink " + inkShown + "/10";
+  ctx.strokeText(inkLabel, W / 2, my + mh / 2 + 1);
+  ctx.fillStyle = "#16234c";
+  ctx.fillText(inkLabel, W / 2, my + mh / 2 + 1);
+
+  // ---- prompt: drawn ABOVE the tray, over the bottom of the field, so the
+  // unit cards can never cover it
+  if (G.selected) {
+    var pfs = Math.round(15 * ui);
+    ctx.font = "bold " + pfs + "px " + FONT;
+    var prompt = UNITS[G.selected].instant
+      ? "Tap anywhere on the field \u2014 or aim with arrows and press Space"
+      : "Tap your blue soil \u2014 or aim with arrows and press Space";
+    var pw = ctx.measureText(prompt).width + 26 * ui;
+    var ph = 26 * ui;
+    var px = W / 2 - pw / 2;
+    var py = top - ph - 8 * ui;
+    ctx.save();
+    ctx.fillStyle = "rgba(255,254,248,0.95)";
+    roundRectPath(ctx, px, py, pw, ph, ph / 2);
+    ctx.fill();
+    ctx.strokeStyle = C.blue;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    ctx.fillStyle = "#16234c";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(prompt, W / 2, py + ph / 2 + 1);
+    // red arrow pointing down at the deployment bar
+    ctx.fillStyle = C.red;
+    ctx.beginPath();
+    var ax = W / 2, ay = py + ph + 2 * ui;
+    ctx.moveTo(ax - 7 * ui, ay); ctx.lineTo(ax + 7 * ui, ay); ctx.lineTo(ax, ay + 10 * ui);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // ---- army counter, so the unit cap is never a mystery
+  var allyN = countSide("blue"), foeN = countSide("red");
+  ctx.save();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(13 * ui) + "px " + FONT;
+  ctx.fillStyle = allyN >= MAX_UNITS_PER_SIDE ? C.red : "#4a5578";
+  ctx.fillText("Units " + allyN + "/" + MAX_UNITS_PER_SIDE, 14 * ui, my + mh / 2);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#4a5578";
+  ctx.fillText("Enemy " + foeN, W - 14 * ui, my + mh / 2);
+  ctx.restore();
+
+  // ---- unit cards
+  var cards = cardRects();
+  for (var c = 0; c < cards.length; c++) drawCard(cards[c], c);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+function drawCard(rect, index) {
+  var ui = L.ui;
+  var def = UNITS[rect.key];
+  var afford = G.ink >= def.cost;
+  var selected = G.selected === rect.key;
+  var hover = G.mouse.x >= rect.x && G.mouse.x <= rect.x + rect.w &&
+              G.mouse.y >= rect.y && G.mouse.y <= rect.y + rect.h;
+  var rng = mulberry32(700 + index * 37);
+
+  ctx.save();
+  ctx.globalAlpha = afford ? 1 : 0.42;
+
+  if (selected) {
+    ctx.shadowColor = "rgba(23,53,156,0.35)";
+    ctx.shadowBlur = 12 * ui;
+  }
+  ctx.fillStyle = C.cardBg;
+  roundRectPath(ctx, rect.x, rect.y, rect.w, rect.h, 8 * ui);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // yellow tape on the selected card
+  if (selected) {
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = C.tape;
+    var tw = rect.w * 0.52, th = 13 * ui;
+    ctx.translate(rect.x + rect.w / 2, rect.y + 2 * ui);
+    ctx.rotate(-0.05);
+    ctx.fillRect(-tw / 2, -th / 2, tw, th);
+    ctx.strokeStyle = C.tapeLine;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-tw / 2, -th / 2, tw, th);
+    ctx.restore();
+  }
+
+  ctx.strokeStyle = selected ? "#0e2270" : (hover && afford ? "#3a5fc8" : "#1d2b55");
+  ctx.lineWidth = selected ? 3 : 2;
+  sketchRoundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8 * ui, 700 + index * 91, 1.0);
+
+  // sprite
+  var sp = unitSprite(rect.key, "blue");
+  var s = Math.min(rect.h * 0.52, 54 * ui);
+  ctx.drawImage(sp.canvas, rect.x + rect.w / 2 - s / 2, rect.y + rect.h * 0.18, s, s);
+
+  ctx.globalAlpha = 1;
+
+  // index badge (top-left)
+  ctx.save();
+  ctx.globalAlpha = afford ? 1 : 0.5;
+  ctx.fillStyle = "#fff";
+  ctx.strokeStyle = "#1d2b55";
+  ctx.lineWidth = 1.4;
+  roundRectPath(ctx, rect.x + 5 * ui, rect.y + 5 * ui, 17 * ui, 17 * ui, 3 * ui);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = "#1d2b55";
+  ctx.font = "bold " + Math.round(11 * ui) + "px " + FONT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(index + 1), rect.x + 5 * ui + 8.5 * ui, rect.y + 5 * ui + 9 * ui);
+  ctx.restore();
+
+  // cost badge (top-right)
+  var cx = rect.x + rect.w - 15 * ui, cy = rect.y + 15 * ui;
+  ctx.save();
+  ctx.globalAlpha = afford ? 1 : 0.55;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 11 * ui, 0, 6.2832);
+  ctx.fillStyle = afford ? C.blue : C.grey;
+  ctx.fill();
+  ctx.strokeStyle = "#0e2270";
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold " + Math.round(12 * ui) + "px " + FONT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(def.cost), cx, cy + 0.5);
+  ctx.restore();
+
+  // name
+  ctx.globalAlpha = afford ? 1 : 0.45;
+  ctx.fillStyle = "#16234c";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  var fs = Math.max(10, Math.round(Math.min(15 * ui, rect.w / 8.2)));
+  ctx.font = "bold " + fs + "px " + FONT;
+  ctx.fillText(def.name, rect.x + rect.w / 2, rect.y + rect.h - 9 * ui);
+  ctx.restore();
+
+  pushButton({
+    id: "card-" + rect.key, x: rect.x, y: rect.y, w: rect.w, h: rect.h,
+    cardKey: rect.key, action: function () { selectCard(rect.key); }
+  });
+}
+
+function drawHint() {
+  if (G.hintT <= 0 || !G.hint) return;
+  var a = Math.min(1, G.hintT);
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(15 * L.ui) + "px " + FONT;
+  var wdt = ctx.measureText(G.hint).width + 28 * L.ui;
+  var hgt = 30 * L.ui;
+  // just above the deployment tray, where the player is already looking
+  var x = W / 2, y = H - L.barH - hgt - 42 * L.ui;
+  if (G.selected) y -= hgt + 6 * L.ui;
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  roundRectPath(ctx, x - wdt / 2, y, wdt, hgt, 6 * L.ui);
+  ctx.fill();
+  ctx.strokeStyle = C.red;
+  ctx.lineWidth = 1.8;
+  ctx.stroke();
+  ctx.fillStyle = C.red;
+  ctx.fillText(G.hint, x, y + hgt / 2 + 1);
+  ctx.restore();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+function drawPaused() {
+  ctx.save();
+  ctx.fillStyle = "rgba(240,244,250,0.55)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(52 * L.ui) + "px " + FONT;
+  ctx.fillStyle = "#16234c";
+  ctx.fillText("PAUSED", W / 2, H / 2 - 10 * L.ui);
+  ctx.font = "bold " + Math.round(16 * L.ui) + "px " + FONT;
+  ctx.fillStyle = "#3a4a72";
+  ctx.fillText("press P to resume", W / 2, H / 2 + 30 * L.ui);
+  ctx.restore();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+/* --- menu --- */
+function drawButton(x, y, w, h, label, opts) {
+  opts = opts || {};
+  var ui = L.ui;
+  var hover = G.mouse.x >= x && G.mouse.x <= x + w && G.mouse.y >= y && G.mouse.y <= y + h;
+  var active = !!opts.active;
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+
+  var fill = active ? "#ffd54a" : (opts.primary ? "#1f47b8" : "#fffef8");
+  if (hover) fill = active ? "#ffdf6e" : (opts.primary ? "#2a55cc" : "#eef3fc");
+
+  // the red "shadow" edge under the primary button
+  if (opts.primary) {
+    ctx.fillStyle = "rgba(198,39,45,0.9)";
+    roundRectPath(ctx, x + 3 * ui, y + 7 * ui, w, h, 8 * ui);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = fill;
+  roundRectPath(ctx, x, y, w, h, 8 * ui);
+  ctx.fill();
+  ctx.strokeStyle = opts.primary ? "#0e2270" : "#1d2b55";
+  ctx.lineWidth = 2.4;
+  sketchRoundRect(ctx, x, y, w, h, 8 * ui, hashStr(label) + x, 1.0);
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  var fs = opts.fontSize || Math.round(h * 0.42);
+  ctx.font = "bold " + fs + "px " + FONT;
+  ctx.fillStyle = opts.primary ? "#ffffff" : "#16234c";
+  ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+  ctx.restore();
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  pushButton({ id: "btn-" + label, x: x, y: y, w: w, h: h, action: opts.action || function () {} });
+}
+
+function drawMenuVignette(x, y, w, h) {
+  var ui = clamp(w / 430, 0.7, 1.3);
+  ctx.save();
+
+  // the "photo" card
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  roundRectPath(ctx, x, y, w, h, 4 * ui);
+  ctx.fill();
+  ctx.save();
+  roundRectPath(ctx, x, y, w, h, 4 * ui);
+  ctx.clip();
+
+  var horizon = y + h * 0.52;
+  ctx.fillStyle = "rgba(214,140,140,0.20)";
+  ctx.fillRect(x, y, w, horizon - y);
+  ctx.fillStyle = "rgba(120,150,215,0.20)";
+  ctx.fillRect(x, horizon, w, y + h - horizon);
+
+  ctx.strokeStyle = "rgba(120,160,210,0.35)";
+  ctx.lineWidth = 1;
+  for (var gx = x; gx < x + w; gx += 22 * ui) {
+    ctx.beginPath(); ctx.moveTo(gx, y); ctx.lineTo(gx, y + h); ctx.stroke();
+  }
+  for (var gy = y; gy < y + h; gy += 22 * ui) {
+    ctx.beginPath(); ctx.moveTo(x, gy); ctx.lineTo(x + w, gy); ctx.stroke();
+  }
+
+  // trench line
+  var rng = mulberry32(4242);
+  ctx.strokeStyle = "#1b2a52";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var px = x; px <= x + w; px += 12 * ui) {
+    var py = horizon + Math.sin(px * 0.05) * 6 * ui + (rng() * 2 - 1) * 2;
+    if (px === x) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(26,36,64,0.5)";
+  ctx.lineWidth = 1.3;
+  for (var hx = x + 10; hx < x + w - 6; hx += 16 * ui) {
+    ctx.beginPath();
+    ctx.moveTo(hx - 5 * ui, horizon + 8 * ui);
+    ctx.lineTo(hx + 5 * ui, horizon + 14 * ui);
+    ctx.stroke();
+  }
+
+  // a few doodle soldiers on both sides
+  function paste(side, key, px2, py2, s) {
+    var sp = unitSprite(key, side);
+    var size = 46 * ui * s;
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    ctx.drawImage(sp.canvas, x + px2 * w - size / 2, y + py2 * h - size / 2, size, size);
+    ctx.restore();
+  }
+  paste("red", "soldier", 0.20, 0.24, 1);
+  paste("red", "soldier", 0.42, 0.16, 0.85);
+  paste("red", "mg", 0.70, 0.34, 1.05);
+  paste("blue", "soldier", 0.14, 0.86, 1.0);
+  paste("blue", "mg", 0.36, 0.74, 1.1);
+  paste("blue", "artillery", 0.60, 0.80, 1.15);
+  paste("blue", "tank", 0.80, 0.68, 1.1);
+
+  // star bursts
+  ctx.strokeStyle = "rgba(30,45,90,0.75)";
+  ctx.lineWidth = 1.4;
+  starBurst(ctx, x + w * 0.30, horizon - 26 * ui, 9 * ui, rng, 8);
+  starBurst(ctx, x + w * 0.86, horizon - 16 * ui, 8 * ui, rng, 8);
+  ctx.restore();
+
+  // card outline
+  ctx.strokeStyle = "#1d2b55";
+  ctx.lineWidth = 2;
+  sketchRect(ctx, x, y, w, h, 909, 1.6);
+
+  // tape corners
+  ctx.fillStyle = C.tape;
+  var tapes = [[x + 8 * ui, y - 2 * ui, -0.6], [x + w - 54 * ui, y + h - 12 * ui, 0.5]];
+  for (var i = 0; i < tapes.length; i++) {
+    ctx.save();
+    ctx.translate(tapes[i][0] + 23 * ui, tapes[i][1] + 8 * ui);
+    ctx.rotate(tapes[i][2]);
+    ctx.fillRect(-23 * ui, -8 * ui, 46 * ui, 16 * ui);
+    ctx.strokeStyle = C.tapeLine;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-23 * ui, -8 * ui, 46 * ui, 16 * ui);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawMenu() {
+  var ui = L.ui;
+  var wide = W > 860;
+  var pad = W * 0.05;
+
+  if (wide) {
+    var vw = Math.min(W * 0.40, H * 0.86 * 1.18);
+    var vh = vw * 0.86;
+    drawMenuVignette(pad, (H - vh) / 2, vw, vh);
+  }
+
+  var bx = wide ? W * 0.51 : pad;
+  var bw = wide ? W * 0.44 : W * 0.90;
+  var y = wide ? H * 0.10 : H * 0.05;
+  if (!wide) y = H * 0.04;
+
+  // title — sized to always fit the column
+  var ts = Math.min(H * 0.19, 130);
+  ctx.font = "bold " + Math.round(ts) + "px " + FONT;
+  var tw = ctx.measureText("Paper Trench").width;
+  if (tw > bw * 0.97) ts = ts * (bw * 0.97 / tw);
+  ctx.save();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "bold " + Math.round(ts) + "px " + FONT;
+  ctx.fillStyle = C.blue;
+  ctx.save();
+  ctx.translate(bx, y + ts * 0.82);
+  ctx.rotate(-0.013);
+  ctx.fillText("Paper Trench", 0, 0);
+  ctx.lineCap = "round";
+  ctx.strokeStyle = C.red;
+  ctx.lineWidth = Math.max(2, ts * 0.055);
+  sketchLine(ctx, ts * 0.16, ts * 0.20, bw * 0.96, ts * 0.13, mulberry32(5), ts * 0.035);
+  ctx.strokeStyle = C.blueDeep;
+  ctx.lineWidth = Math.max(1.6, ts * 0.04);
+  sketchLine(ctx, ts * 0.10, ts * 0.31, bw * 0.80, ts * 0.25, mulberry32(6), ts * 0.03);
+  ctx.restore();
+  ctx.restore();
+  y += ts * 1.05;
+
+  // subtitle
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#22305a";
+  var ss = Math.round(Math.min(19 * ui, bw / 26));
+  ctx.font = "bold " + ss + "px " + FONT;
+  y = wrapText(ctx, "Push the front. Control more territory after 3 minutes — or reach the red HQ to win early.",
+               bx, y + ss, bw, ss * 1.28);
+  y += ss * 0.5;
+
+  ctx.font = "bold " + Math.round(ss * 0.86) + "px " + FONT;
+  ctx.fillStyle = "#4a5578";
+  y = wrapText(ctx, "纸面战壕：墨水有限，前线靠推。3 分钟后领土多者胜，或直接打爆红色指挥部。",
+               bx, y + ss * 0.95, bw, ss * 1.2);
+  y += ss * 0.9;
+
+  // opponent picker
+  ctx.font = "bold " + Math.round(16 * ui) + "px " + FONT;
+  ctx.fillStyle = C.red;
+  ctx.fillText("Opponent", bx, y + 14 * ui);
+  y += 24 * ui;
+
+  var keys = ["recruit", "sergeant", "general"];
+  var gap = 10 * ui;
+  var bwid = (bw - gap * 2) / 3;
+  var bhei = Math.min(46 * ui, H * 0.075);
+  for (var i = 0; i < keys.length; i++) {
+    (function (key, i) {
+      drawButton(bx + i * (bwid + gap), y, bwid, bhei, DIFFS[key].name, {
+        active: G.diff === key,
+        fontSize: Math.round(Math.min(17 * ui, bwid / 8.4)),
+        action: function () { G.diff = key; }
+      });
+    })(keys[i], i);
+  }
+  ctx.font = "bold " + Math.round(13 * ui) + "px " + FONT;
+  ctx.fillStyle = "#4a5578";
+  ctx.fillText(DIFFS[G.diff].cn + " · " + DIFFS[G.diff].blurb, bx, y + bhei + 17 * ui);
+  y += bhei + 30 * ui;
+
+  // play
+  var ph = Math.min(74 * ui, H * 0.115);
+  drawButton(bx, y, bw, ph, "Play", {
+    primary: true,
+    fontSize: Math.round(Math.min(36 * ui, ph * 0.5)),
+    action: function () { startGame(G.diff); }
+  });
+  y += ph + 18 * ui;
+
+  // unit guide toggle
+  var gh = Math.min(34 * ui, H * 0.055);
+  var gx = bx, gw = bw;
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.7)";
+  roundRectPath(ctx, gx, y, gw, gh, 5 * ui);
+  ctx.fill();
+  ctx.setLineDash([7 * ui, 5 * ui]);
+  ctx.strokeStyle = "#1d2b55";
+  ctx.lineWidth = 1.8;
+  roundRectPath(ctx, gx, y, gw, gh, 5 * ui);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#16234c";
+  ctx.font = "bold " + Math.round(14 * ui) + "px " + FONT;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText((G.guideOpen ? "▼ " : "▶ ") + "Unit guide (optional)", gx + 14 * ui, y + gh / 2 + 1);
+  ctx.restore();
+  ctx.textBaseline = "alphabetic";
+  pushButton({ id: "guide", x: gx, y: y, w: gw, h: gh, action: function () { G.guideOpen = !G.guideOpen; } });
+  y += gh + 10 * ui;
+
+  // hotkey discovery
+  ctx.save();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.font = "bold " + Math.round(12.5 * ui) + "px " + FONT;
+  ctx.fillStyle = "#6b7699";
+  ctx.fillText("Keyboard:  1 2 3 difficulty  ·  Enter play  ·  G guide  ·  H all shortcuts",
+               bx + 6 * ui, y + 6 * ui);
+  ctx.restore();
+  ctx.textBaseline = "alphabetic";
+
+  if (G.guideOpen) drawGuideModal();
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+function drawGuideModal() {
+  var ui = L.ui;
+  ctx.save();
+  ctx.fillStyle = "rgba(236,241,248,0.82)";
+  ctx.fillRect(0, 0, W, H);
+
+  var rows = ORDER.length;
+  var pw = Math.min(W * 0.86, 780 * ui);
+  var rowH = Math.min(86 * ui, (H * 0.80 - 96 * ui) / rows);
+  var ph = rowH * rows + 96 * ui;
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+
+  ctx.fillStyle = "rgba(255,254,248,0.98)";
+  roundRectPath(ctx, px, py, pw, ph, 10 * ui);
+  ctx.fill();
+  ctx.strokeStyle = "#1d2b55";
+  ctx.lineWidth = 2.2;
+  sketchRoundRect(ctx, px, py, pw, ph, 10 * ui, 4711, 1.4);
+
+  // tape
+  ctx.fillStyle = C.tape;
+  ctx.save();
+  ctx.translate(px + pw / 2, py + 4 * ui);
+  ctx.rotate(-0.025);
+  ctx.fillRect(-46 * ui, -8 * ui, 92 * ui, 16 * ui);
+  ctx.strokeStyle = C.tapeLine;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-46 * ui, -8 * ui, 92 * ui, 16 * ui);
+  ctx.restore();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "bold " + Math.round(21 * ui) + "px " + FONT;
+  ctx.fillStyle = C.blue;
+  ctx.fillText("Unit guide · 单位图鉴", px + pw / 2, py + 40 * ui);
+
+  var iconW = rowH * 0.78;
+  var textX = px + 20 * ui + iconW + 10 * ui;
+  var textW = pw - (textX - px) - 22 * ui;
+
+  for (var i = 0; i < rows; i++) {
+    var key = ORDER[i];
+    var def = UNITS[key];
+    var ry = py + 62 * ui + i * rowH;
+
+    if (i % 2 === 0) {
+      ctx.fillStyle = "rgba(210,222,240,0.30)";
+      roundRectPath(ctx, px + 12 * ui, ry - 2 * ui, pw - 24 * ui, rowH - 4 * ui, 5 * ui);
+      ctx.fill();
+    }
+
+    var sp = unitSprite(key, "blue");
+    ctx.drawImage(sp.canvas, px + 20 * ui, ry + rowH / 2 - iconW / 2, iconW, iconW);
+
+    ctx.textAlign = "left";
+    ctx.font = "bold " + Math.round(15 * ui) + "px " + FONT;
+    ctx.fillStyle = "#16234c";
+    ctx.fillText(def.name + "  " + def.cn, textX, ry + rowH * 0.28);
+
+    var costW = ctx.measureText(def.name).width;
+    ctx.font = "bold " + Math.round(13 * ui) + "px " + FONT;
+    ctx.fillStyle = C.blue;
+    ctx.fillText(def.cost + " ink", textX + Math.max(costW, textW * 0.42) + 16 * ui, ry + rowH * 0.28);
+
+    ctx.font = "bold " + Math.round(11.5 * ui) + "px " + FONT;
+    ctx.fillStyle = "#5a6488";
+    var stats;
+    if (def.instant) stats = "instant · radius " + def.radius + " · " + def.dmg + " dmg";
+    else stats = "hp " + def.hp + " · dps " + (def.dmg / def.rate).toFixed(1) +
+                 " · range " + def.range + " · speed " + def.speed;
+    ctx.fillText(stats, textX, ry + rowH * 0.52);
+
+    ctx.font = "bold " + Math.round(11.5 * ui) + "px " + FONT;
+    ctx.fillStyle = "#4a5578";
+    wrapText(ctx, def.desc, textX, ry + rowH * 0.76, textW, 13 * ui);
+  }
+
+  ctx.textAlign = "center";
+  ctx.font = "bold " + Math.round(12 * ui) + "px " + FONT;
+  ctx.fillStyle = "#6b7699";
+  ctx.fillText("click anywhere or press G to close", px + pw / 2, py + ph - 14 * ui);
+  ctx.restore();
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  pushButton({ id: "guide-close", x: 0, y: 0, w: W, h: H,
+               action: function () { G.guideOpen = false; } });
+}
+
+/* --- hotkey help overlay --- */
+var HELP_ROWS = [
+  ["Menu", [
+    ["1 2 3", "pick the opponent difficulty"],
+    ["\u2190 \u2192", "cycle difficulty"],
+    ["Enter", "start the match (also: play again)"],
+    ["G", "unit guide"]
+  ]],
+  ["Battle", [
+    ["1 \u2013 5", "pick a unit card"],
+    ["Q / E", "previous / next card"],
+    ["\u2190 \u2191 \u2193 \u2192", "move the aim cursor (WASD works too)"],
+    ["Shift + move", "move the cursor faster"],
+    ["Space", "deploy at the cursor \u2014 keeps the card selected"],
+    ["Esc", "cancel the selection"],
+    ["P", "pause / resume"],
+    ["F", "switch 1x / 2x speed"]
+  ]],
+  ["Always", [
+    ["H  or  ?", "show / hide this list"],
+    ["Esc", "close this list"]
+  ]]
+];
+
+function drawHelpModal() {
+  var ui = L.ui;
+  ctx.save();
+  ctx.fillStyle = "rgba(236,241,248,0.84)";
+  ctx.fillRect(0, 0, W, H);
+
+  var pw = Math.min(W * 0.88, 720 * ui);
+  var rowH = Math.min(30 * ui, (H * 0.82 - 120 * ui) / 15);
+  var hdrH = 34 * ui;
+  var total = 0;
+  for (var s = 0; s < HELP_ROWS.length; s++) total += hdrH + HELP_ROWS[s][1].length * rowH;
+  var ph = Math.min(H * 0.9, total + 84 * ui);
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+
+  ctx.fillStyle = "rgba(255,254,248,0.98)";
+  roundRectPath(ctx, px, py, pw, ph, 10 * ui);
+  ctx.fill();
+  ctx.strokeStyle = "#1d2b55";
+  ctx.lineWidth = 2.2;
+  sketchRoundRect(ctx, px, py, pw, ph, 10 * ui, 8123, 1.4);
+
+  ctx.fillStyle = C.tape;
+  ctx.save();
+  ctx.translate(px + pw / 2, py + 4 * ui);
+  ctx.rotate(-0.025);
+  ctx.fillRect(-46 * ui, -8 * ui, 92 * ui, 16 * ui);
+  ctx.strokeStyle = C.tapeLine;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-46 * ui, -8 * ui, 92 * ui, 16 * ui);
+  ctx.restore();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "bold " + Math.round(21 * ui) + "px " + FONT;
+  ctx.fillStyle = C.blue;
+  ctx.fillText("Keyboard shortcuts · 快捷键", px + pw / 2, py + 40 * ui);
+
+  var y = py + 66 * ui;
+  var capW = 96 * ui, capH = 22 * ui;
+  for (var i = 0; i < HELP_ROWS.length; i++) {
+    ctx.textAlign = "left";
+    ctx.font = "bold " + Math.round(13 * ui) + "px " + FONT;
+    ctx.fillStyle = C.red;
+    ctx.fillText(HELP_ROWS[i][0], px + 26 * ui, y + 14 * ui);
+    y += hdrH * 0.72;
+    for (var r = 0; r < HELP_ROWS[i][1].length; r++) {
+      var cap = HELP_ROWS[i][1][r][0], desc = HELP_ROWS[i][1][r][1];
+      // key cap
+      ctx.fillStyle = "#eef3fc";
+      roundRectPath(ctx, px + 26 * ui, y + 1 * ui, capW, capH, 4 * ui);
+      ctx.fill();
+      ctx.strokeStyle = "#42527e";
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.textAlign = "center";
+      ctx.font = "bold " + Math.round(11.5 * ui) + "px " + FONT;
+      ctx.fillStyle = "#16234c";
+      ctx.fillText(cap, px + 26 * ui + capW / 2, y + capH * 0.72);
+      // description
+      ctx.textAlign = "left";
+      ctx.font = "bold " + Math.round(12.5 * ui) + "px " + FONT;
+      ctx.fillStyle = "#3a4668";
+      ctx.fillText(desc, px + 26 * ui + capW + 14 * ui, y + capH * 0.72);
+      y += rowH;
+    }
+    y += 8 * ui;
+  }
+
+  ctx.textAlign = "center";
+  ctx.font = "bold " + Math.round(12 * ui) + "px " + FONT;
+  ctx.fillStyle = "#6b7699";
+  ctx.fillText("press H or Esc to close", px + pw / 2, py + ph - 14 * ui);
+  ctx.restore();
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  pushButton({ id: "help-close", x: 0, y: 0, w: W, h: H,
+               action: function () { setHelp(false); } });
+}
+
+/* --- game over --- */
+function drawOver() {
+  var ui = L.ui;
+  ctx.save();
+  ctx.fillStyle = "rgba(238,242,248,0.78)";
+  ctx.fillRect(0, 0, W, H);
+
+  var cw = Math.min(W * 0.62, 560 * ui);
+  var chh = Math.min(H * 0.62, 340 * ui);
+  var cx = (W - cw) / 2, cy = (H - chh) / 2;
+
+  ctx.fillStyle = "rgba(255,254,248,0.97)";
+  roundRectPath(ctx, cx, cy, cw, chh, 10 * ui);
+  ctx.fill();
+  ctx.strokeStyle = "#1d2b55";
+  ctx.lineWidth = 2.4;
+  sketchRoundRect(ctx, cx, cy, cw, chh, 10 * ui, 31337, 1.6);
+
+  var win = G.result && G.result.win === "blue";
+  var pct = G.result ? Math.round(G.result.pct * 100) : 50;
+
+  // tape
+  ctx.fillStyle = C.tape;
+  ctx.save();
+  ctx.translate(cx + cw / 2, cy + 4 * ui);
+  ctx.rotate(-0.03);
+  ctx.fillRect(-52 * ui, -9 * ui, 104 * ui, 18 * ui);
+  ctx.strokeStyle = C.tapeLine;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-52 * ui, -9 * ui, 104 * ui, 18 * ui);
+  ctx.restore();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "bold " + Math.round(Math.min(56 * ui, cw / 8)) + "px " + FONT;
+  ctx.fillStyle = win ? C.blue : C.red;
+  ctx.fillText(win ? "VICTORY" : "DEFEAT", cx + cw / 2, cy + chh * 0.30);
+  ctx.strokeStyle = win ? C.blueDeep : C.redDeep;
+  ctx.lineWidth = 3;
+  sketchLine(ctx, cx + cw * 0.22, cy + chh * 0.35, cx + cw * 0.78, cy + chh * 0.33, mulberry32(88), 2.5);
+
+  var msg;
+  if (G.endReason === "hq") msg = "红色指挥部被摧毁 · Red HQ destroyed";
+  else if (G.endReason === "hqLost") msg = "你的指挥部被摧毁 · Your HQ fell";
+  else msg = "时间到 · Time up";
+
+  ctx.font = "bold " + Math.round(17 * ui) + "px " + FONT;
+  ctx.fillStyle = "#2b3760";
+  ctx.fillText(msg, cx + cw / 2, cy + chh * 0.46);
+
+  ctx.font = "bold " + Math.round(22 * ui) + "px " + FONT;
+  ctx.fillStyle = "#16234c";
+  ctx.fillText("Territory  你 " + pct + "%  :  " + (100 - pct) + "%  敌", cx + cw / 2, cy + chh * 0.57);
+
+  var bwid = cw * 0.34, bhei = Math.min(56 * ui, chh * 0.18);
+  var gap2 = cw * 0.06;
+  var by = cy + chh * 0.68;
+  drawButton(cx + cw / 2 - bwid - gap2 / 2, by, bwid, bhei, "Play again", {
+    primary: true,
+    fontSize: Math.round(bhei * 0.42),
+    action: function () { startGame(G.diff); }
+  });
+  drawButton(cx + cw / 2 + gap2 / 2, by, bwid, bhei, "Menu", {
+    fontSize: Math.round(bhei * 0.42),
+    action: function () { G.screen = "menu"; }
+  });
+  ctx.restore();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}
+
+/* -------------------------------- loop --------------------------------- */
+var last = 0;
+function frame(now) {
+  if (!last) last = now;
+  var dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05;
+
+  if (G.screen === "playing" && !G.paused) {
+    var steps = G.speed;
+    for (var i = 0; i < steps; i++) {
+      if (G.screen === "playing") update(dt);
+    }
+  } else {
+    G.t += dt;
+  }
+
+  render();
+  requestAnimationFrame(frame);
+}
+
+/* ------------------------------- boot ---------------------------------- */
+window.addEventListener("resize", function () {
+  resize();
+  if (G.screen !== "menu" && G.playerHQ) {
+    // keep HQ anchored to the new edges
+    var m = Math.round(38 * L.ui);
+    G.playerHQ.x = m;
+    G.enemyHQ.x = W - m;
+    G.playerHQ.y = L.field.y + L.field.h / 2;
+    G.enemyHQ.y = L.field.y + L.field.h / 2;
+    G.frontX = clamp(G.frontX, 60, W - 60);
+  }
+});
+
+resize();
+G.playerHQ = { side: "blue", isHQ: true, x: 38, y: 0, hp: HQ_HP, maxHp: HQ_HP, flash: 0 };
+G.enemyHQ  = { side: "red",  isHQ: true, x: W - 38, y: 0, hp: HQ_HP, maxHp: HQ_HP, flash: 0 };
+G.frontX = W / 2;
+G.ink = 10;
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

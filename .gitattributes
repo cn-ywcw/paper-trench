@@ -1,0 +1,8 @@
+# Keep the source LF everywhere — it is a single-file HTML game, and the
+# Git for Windows default (core.autocrlf=true) would otherwise churn it to CRLF.
+* text=auto eol=lf
+
+# Screenshots must never be line-ending-translated.
+*.png binary
+*.jpg binary
+*.gif binary

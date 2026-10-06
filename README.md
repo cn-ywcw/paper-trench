@@ -2,6 +2,8 @@
 
 > 单文件 · 零依赖 · 零构建 —— 双击 HTML 就能玩的 Canvas 涂鸦风即时战略
 
+### ▶ [**在线试玩 · Play in browser**](https://cn-ywcw.github.io/paper-trench/paper-trench.html)
+
 一张方格纸，两支墨水笔。蓝墨水是你的部队，红墨水是敌人的。在 3 分钟内把前线推过去，抢下更多领土——或者直接把对面的红色指挥部打爆。
 
 ![游戏画面](preview-gameplay.png)
@@ -10,11 +12,11 @@
 
 不需要安装任何东西，不需要构建，不需要服务器。
 
-```
-双击打开 paper-trench.html
-```
+**方式一 —— 在线玩：** 打开 <https://cn-ywcw.github.io/paper-trench/paper-trench.html>
 
-游戏完全离线运行：所有美术都是 Canvas 2D 现画的，没有任何图片、字体或 CDN 依赖。
+**方式二 —— 本地玩：** 下载仓库后双击 `paper-trench.html`（或者直接把这个文件拷给别人）
+
+游戏完全离线运行：所有美术都是 Canvas 2D 现画的，没有任何图片、字体或 CDN 依赖，所以单个 HTML 文件本身就是完整的游戏。
 
 ## 玩法
 
@@ -139,7 +141,8 @@ preview-hotkeys.png
 **Paper Trench** is a single-file, zero-dependency browser RTS drawn in a graph-paper
 doodle style. Blue ink is you, red ink is the enemy.
 
-- Open `paper-trench.html` — no build step, no server, no network
+- **Play online:** <https://cn-ywcw.github.io/paper-trench/paper-trench.html> — or open
+  `paper-trench.html` locally; no build step, no server, no network
 - A match lasts **3 minutes**. Win by holding **more than 50% of the territory** at time
   up, or by **destroying the red HQ** early
 - **Ink** is the only resource (cap 10). Deploy from the bottom bar by clicking a card
